@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pytz
+httpx
+pandas
+numpy
+yfinance
+python-dotenv
+sqlalchemy
+firebase-admin
+apscheduler
+requests
