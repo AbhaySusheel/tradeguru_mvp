@@ -2,8 +2,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 from fastapi import FastAPI
-from backend.routes.stocks import router as stocks_router
-from backend.scheduler import start_scheduler
+from routes.stocks import router as stocks_router
+
+from scheduler import start_scheduler
 from contextlib import asynccontextmanager
 
 
