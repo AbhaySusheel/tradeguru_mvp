@@ -5,10 +5,10 @@ import os
 from datetime import datetime as dt
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from backend.data.fetch_data import fetch_data
-from backend.models.stock_model import generate_signals
-from backend.db.database import SessionLocal, signals
-from backend.utils.notifier import send_push
+from data.fetch_data import fetch_data
+from models.stock_model import generate_signals
+from db.database import SessionLocal, signals
+from utils.notifier import send_push
 
 
 def run_realtime_trader():

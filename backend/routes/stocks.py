@@ -1,7 +1,7 @@
 from fastapi import APIRouter
-from backend.db.database import SessionLocal
-from backend.models.stock_model import generate_signals
-from backend.data.fetch_data import fetch_data
+from db.database import SessionLocal
+from models.stock_model import generate_signals
+from data.fetch_data import fetch_data
 
 
 from sqlalchemy import text  # add this import at the top of the file
