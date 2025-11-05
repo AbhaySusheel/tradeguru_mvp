@@ -1,82 +1,47 @@
+# backend/scheduler_jobs.py
 import time
-import pytz
-import datetime
-import os
-from datetime import datetime as dt
-from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime
+from utils.market import fetch_intraday, compute_features
+from utils.score import score_from_features
+import csv
+import sqlite3
 
-from data.fetch_data import fetch_data
-from models.stock_model import generate_signals
-from db.database import SessionLocal, signals
-from utils.notifier import send_push
+DB = "app.db"
 
+def load_universe(csv_path="tickers.csv"):
+    with open(csv_path) as f:
+        return [line.strip() for line in f if line.strip()]
 
-def run_realtime_trader():
-    tz = pytz.timezone("Asia/Kolkata")
-    market_open = datetime.time(9, 15)
-    market_close = datetime.time(15, 30)
-    session = SessionLocal()
-    tickers = os.getenv("STOCK_LIST", "TCS.NS,INFY.NS").split(",")
+def save_top_picks(picks, top_n=5):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS top_picks(
+                 ts TEXT, symbol TEXT, last_price REAL, score REAL, intraday_pct REAL)""")
+    ts = datetime.utcnow().isoformat()
+    for p in picks[:top_n]:
+        c.execute("INSERT INTO top_picks(ts,symbol,last_price,score,intraday_pct) VALUES (?,?,?,?,?)",
+                  (ts, p.get("symbol"), p.get("last_price"), p.get("score"), p.get("intraday_pct")))
+    conn.commit()
+    conn.close()
 
-    print("🚀 Starting real-time trading signal engine...")
+def find_top_picks_scheduler(batch_size=40):
+    universe = load_universe("tickers.csv")  # Full NSE list
+    features_list = []
 
-    while True:
-        now = dt.now(tz)
-        current_time = now.time()
+    for i in range(0, len(universe), batch_size):
+        batch = universe[i:i+batch_size]
+        for symbol in batch:
+            df = fetch_intraday(symbol, interval="5m", period="1d")
+            feats = compute_features(df)
+            if feats:
+                feats["symbol"] = symbol.replace(".NS", "")
+                features_list.append(feats)
+        time.sleep(2)
 
-        # Run only during market hours
-        if market_open <= current_time <= market_close:
-            print(f"⏰ Checking signals at {now.strftime('%H:%M:%S')}")
+    if not features_list:
+        return []
 
-            for ticker in tickers:
-                df = fetch_data(ticker)
-                sigs = generate_signals(df)
-
-                for sig in sigs:
-                    existing = session.execute(
-                        signals.select()
-                        .where(signals.c.symbol == ticker)
-                        .where(signals.c.signal_type == sig['type'])
-                        .where(signals.c.entry == sig['entry'])
-                    ).fetchone()
-
-                    if not existing:
-                        session.execute(
-                            signals.insert().values(
-                                symbol=ticker,
-                                signal_type=sig['type'],
-                                reason=sig['reason'],
-                                entry=sig['entry'],
-                                sl=sig['sl'],
-                                target=sig['target'],
-                                confidence=sig['confidence'],
-                                timestamp=now
-                            )
-                        )
-                        session.commit()
-
-                        # ✅ Send push notification
-                        send_push(
-                            to_token=os.getenv("TEST_DEVICE_TOKEN", ""),
-                            title=f"{sig['type']} Signal for {ticker}",
-                            body=f"{sig['reason']} | Entry: {sig['entry']:.2f}, Target: {sig['target']:.2f}",
-                            data={"symbol": ticker, "type": sig['type']}
-                        )
-                        print(f"📈 Sent signal for {ticker}: {sig['type']}")
-
-            print("✅ Cycle complete. Sleeping 3 minutes...\n")
-            time.sleep(180)
-        else:
-            print("🕒 Market closed. Sleeping 30 minutes.")
-            time.sleep(1800)
-
-
-def start_scheduler():
-    """
-    Launches the real-time trading engine in a background scheduler.
-    This keeps the main FastAPI app responsive.
-    """
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(run_realtime_trader, trigger='date', next_run_time=dt.now())
-    scheduler.start()
-    print("✅ Scheduler started in background.")
+    scored = score_from_features(features_list)
+    save_top_picks(scored, top_n=5)
+    # (Optional) notify function can go here
+    return scored[:5]
