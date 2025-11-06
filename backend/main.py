@@ -8,6 +8,7 @@ from routes.picks import router as picks_router
 from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_scheduler()
