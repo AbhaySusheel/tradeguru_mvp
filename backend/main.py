@@ -3,8 +3,7 @@ load_dotenv()
 
 from fastapi import FastAPI
 from routes.stocks import router as stocks_router
-from scheduler import start_scheduler
-from scheduler_jobs import find_top_picks_scheduler
+from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
 
 
