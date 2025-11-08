@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "839069613242",
+    "project_id": "ai-stock-advisor-fe570",
+    "storage_bucket": "ai-stock-advisor-fe570.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:839069613242:android:aefe9d8d3a804c7d251683",
+        "android_client_info": {
+          "package_name": "com.tradeguruapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDZkDmQ5EdJ2d40Eg7JZGqb2-eKwoS6gb0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

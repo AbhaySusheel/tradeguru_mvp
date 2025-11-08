@@ -8,16 +8,15 @@ export default function App() {
   const [stocks, setStocks] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Your backend base URL
-  const BASE_URL = 'https://tradeguru-mvp.onrender.com';
+  const BASE_URL = 'https://tradeguru-mvp.onrender.com'; // 👈 no /api here
 
   useEffect(() => {
-    // Fetch API status
+    // 1️⃣ Fetch API status
     axios.get(`${BASE_URL}/`)
       .then(response => {
         setStatus(response.data.status);
-        // Fetch stock data (you can change this route later)
-        return axios.get(`${BASE_URL}/stocks`);
+        // 2️⃣ Fetch stock data from /api/stocks
+        return axios.get(`${BASE_URL}/api/stocks`);
       })
       .then(res => {
         setStocks(res.data);
@@ -48,7 +47,9 @@ export default function App() {
           <Card key={index} style={styles.card}>
             <Text style={styles.stockName}>{stock.symbol}</Text>
             <Text>Price: ₹{stock.price}</Text>
-            <Text>Change: {stock.change}%</Text>
+            <Text style={{ color: stock.change >= 0 ? 'green' : 'red' }}>
+              Change: {stock.change}%
+            </Text>
           </Card>
         ))
       ) : (
