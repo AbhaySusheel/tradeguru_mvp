@@ -5,12 +5,18 @@ load_dotenv()
 from fastapi import FastAPI
 from routes.stocks import router as stocks_router
 from routes.picks import router as picks_router
+from db_init import init_db
+
 from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("🗄 Initializing database...")
+    init_db()  # <— add this line
+
+
     start_scheduler()
     print("🚀 Running top stock finder once at startup...")
     # run once at startup to populate DB quickly
