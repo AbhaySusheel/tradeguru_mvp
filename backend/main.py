@@ -5,6 +5,7 @@ load_dotenv()
 from fastapi import FastAPI
 from routes.stocks import router as stocks_router
 from routes.picks import router as picks_router
+from routes.positions import router as positions_router
 from db_init import init_db
 
 from scheduler import start_scheduler, find_top_picks_scheduler
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TradeGuru API", lifespan=lifespan)
 app.include_router(stocks_router, prefix="/api")
 app.include_router(picks_router, prefix="/api")
+app.include_router(positions_router, prefix="/api")
 
 @app.get("/")
 def root():
