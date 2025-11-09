@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+
 from routes.stocks import router as stocks_router
 from routes.picks import router as picks_router
 from routes.positions import router as positions_router
