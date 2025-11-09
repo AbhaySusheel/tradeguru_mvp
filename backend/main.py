@@ -11,6 +11,11 @@ from db_init import init_db
 from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
 import os
+import uvicorn
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))  # Render provides the PORT env variable
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
 
 API_KEY = os.getenv("API_KEY")
 
