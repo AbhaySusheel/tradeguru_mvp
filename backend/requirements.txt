@@ -10,3 +10,4 @@ sqlalchemy
 firebase-admin
 apscheduler
 requests
+nsetools
