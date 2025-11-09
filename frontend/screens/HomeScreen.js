@@ -3,6 +3,8 @@ import { View, Text, FlatList, TouchableOpacity, ActivityIndicator, StyleSheet, 
 import axios from 'axios';
 
 const API_BASE = 'https://tradeguru-mvp.onrender.com/api';
+const API_KEY = '8f912050f8a403046ea774190bf4fa33';
+
 
 export default function HomeScreen({ navigation }) {
   const [tab, setTab] = useState('Top Picks'); // default tab
@@ -20,7 +22,7 @@ export default function HomeScreen({ navigation }) {
       const [tops, all, pos] = await Promise.all([
         axios.get(`${API_BASE}/top-picks`),
         axios.get(`${API_BASE}/all-stocks`),
-        axios.get(`${API_BASE}/positions`)
+        axios.get(`${API_BASE}/positions`, { headers: { 'x-api-key': API_KEY } })
       ]);
 
       setTopPicks(tops.data || []);
@@ -42,22 +44,25 @@ export default function HomeScreen({ navigation }) {
   }, []);
 
   const onBuy = async (stock) => {
-    try {
-      await axios.post(`${API_BASE}/buy`, { symbol: stock.symbol });
-      fetchAll();
-    } catch (err) {
-      console.error(err);
-    }
-  };
+  try {
+    const payload = { symbol: stock.symbol, price: stock.price, size: 1.0, target_pct: 5.0, stop_pct: 1.5 };
+    await axios.post(`${API_BASE}/positions`, payload, { headers: { 'x-api-key': API_KEY } });
+    await fetchPositions();
+  } catch (e) {
+    console.error("Buy failed", e);
+  }
+}
 
-  const onSell = async (stock) => {
-    try {
-      await axios.post(`${API_BASE}/sell`, { symbol: stock.symbol });
-      fetchAll();
-    } catch (err) {
-      console.error(err);
-    }
-  };
+const onSell = async (pos) => {
+  try {
+    // pos.symbol assumed
+    const payload = { symbol: pos.symbol, price: pos.current_price || pos.entry_price };
+    await axios.post(`${API_BASE}/positions/close`, payload, { headers: { 'x-api-key': API_KEY } });
+    await fetchPositions();
+  } catch (e) {
+    console.error("Sell failed", e);
+  }
+}
 
   const filteredStocks = allStocks.filter(s =>
     s.symbol.toLowerCase().includes(search.toLowerCase())
