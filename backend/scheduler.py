@@ -1,12 +1,14 @@
 # backend/scheduler.py
 """
-TradeGuru Async Scheduler - Fully safe version with DB retry and first-run top picks
+TradeGuru Async Scheduler - Render-ready & fully safe version
+Preserves all existing logic but makes scheduler async-safe and robust
 Features:
 - Async top picks fetching with retries
 - Dynamic batching (top 500 symbols)
 - APScheduler safe shutdown
 - First-run top picks always saved
 - SQLite retry for "database is locked" issues
+- Handles already running event loop on Render
 """
 
 import os
@@ -15,6 +17,7 @@ import sqlite3
 import asyncio
 from datetime import datetime as dt, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
+from concurrent.futures import ThreadPoolExecutor
 
 from utils.market import fetch_intraday, compute_features
 from utils.score import score_from_features
@@ -96,10 +99,10 @@ def save_top_picks(picks, top_n=TOP_N):
         c = conn.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS top_picks(
                      ts TEXT, symbol TEXT, last_price REAL, score REAL, intraday_pct REAL)""")
-        ts = dt.utcnow().isoformat()
+        ts_val = dt.utcnow().isoformat()
         for p in picks[:top_n]:
             c.execute("INSERT INTO top_picks(ts,symbol,last_price,score,intraday_pct) VALUES (?,?,?,?,?)",
-                      (ts, p.get('symbol'), p.get('last_price'), p.get('score'), p.get('intraday_pct')))
+                      (ts_val, p.get('symbol'), p.get('last_price'), p.get('score'), p.get('intraday_pct')))
         conn.commit()
         conn.close()
     success = try_db_write(_write)
@@ -122,9 +125,9 @@ def log_notification(type_, symbol, title, body):
         c.execute("""CREATE TABLE IF NOT EXISTS notifications(
                         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, symbol TEXT, note TEXT
                      )""")
-        ts = dt.utcnow().isoformat()
+        ts_val = dt.utcnow().isoformat()
         c.execute("INSERT INTO notifications(ts,type,symbol,note) VALUES (?,?,?,?)",
-                  (ts, type_, symbol, title + " - " + body))
+                  (ts_val, type_, symbol, title + " - " + body))
         conn.commit()
         conn.close()
     try_db_write(_write)
@@ -212,27 +215,31 @@ def find_top_picks_scheduler(batch_size=BATCH_SIZE):
                     features_list.append(r)
             await asyncio.sleep(BATCH_DELAY)
 
+    # ✅ Async-safe event loop handling for Render deployment
     try:
         loop = asyncio.get_event_loop()
+        if loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(run_batches(), loop)
+            future.result()
+        else:
+            loop.run_until_complete(run_batches())
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
-    loop.run_until_complete(run_batches())
+        loop.run_until_complete(run_batches())
 
     if not features_list:
         print("⚠️ No features computed")
         return []
 
     scored = score_from_features(features_list)
-    ts = dt.utcnow().isoformat()
+    ts_val = dt.utcnow().isoformat()
     current_tops = get_current_top_scores(limit=TOP_N)
     first_run = len(current_tops) == 0
     prev_best_score = current_tops[0][1] if current_tops else 0
 
-    # Upsert safely with retry
     for p in scored:
-        p['ts'] = ts
+        p['ts'] = ts_val
         upsert_all_stock(p)
 
     # ----------------------- First-run always save -----------------------
@@ -333,8 +340,6 @@ if __name__ == "__main__":
     start_scheduler()
     try:
         while True:
-            time.sleep(1)  # synchronous sleep to avoid asyncio warnings
+            time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
         shutdown_scheduler()
-
-
