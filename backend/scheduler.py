@@ -170,7 +170,8 @@ def find_top_picks_scheduler(batch_size=BATCH_SIZE):
 
     # run the async batch fetcher
     try:
-        asyncio.run(run_batches())
+        asyncio.get_event_loop().run_until_complete(run_batches())
+
     except Exception as e:
         print("Async batch runner failed:", e)
         # fallback to synchronous single-thread run (best-effort)

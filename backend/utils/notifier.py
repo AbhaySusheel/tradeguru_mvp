@@ -4,12 +4,16 @@ from firebase_admin import credentials, messaging
 
 # Initialize Firebase app only once
 if not firebase_admin._apps:
-   cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    # Try environment variable first
+    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
-if not cred_path:
-    print("❌ GOOGLE_APPLICATION_CREDENTIALS not set — skipping push notifications.")
-else:
-    cred_path = os.path.normpath(cred_path)  # ✅ Normalize Windows path
+    # ✅ Fallback to one directory above (../firebase_key.json)
+    if not cred_path:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        cred_path = os.path.join(base_dir, "..", "firebase_key.json")
+
+    cred_path = os.path.normpath(cred_path)
+
     if not os.path.exists(cred_path):
         print(f"❌ Firebase key file not found at: {cred_path}")
     else:
@@ -18,13 +22,7 @@ else:
         print(f"✅ Firebase initialized using: {cred_path}")
 
 def send_push(to_token: str, title: str, body: str, data: dict = None):
-    """
-    Sends a push notification via Firebase Cloud Messaging (HTTP v1).
-    to_token: FCM device registration token
-    title: Notification title
-    body: Notification body
-    data: Optional dict for extra payload data
-    """
+    """Send a push notification via Firebase Cloud Messaging (FCM)."""
     if not firebase_admin._apps:
         print("⚠️ Firebase not initialized — skipping push.")
         return False
