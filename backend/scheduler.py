@@ -1,11 +1,11 @@
 # backend/scheduler.py
 """
-TradeGuru Async Scheduler - Fully safe version
+TradeGuru Async Scheduler - Fully safe version with first-run top picks
 Features:
 - Async top picks fetching with retries
 - Dynamic batching (top 500 symbols)
 - APScheduler safe shutdown
-- No asyncio.sleep warnings
+- First-run top picks always saved
 """
 
 import os
@@ -190,7 +190,6 @@ def find_top_picks_scheduler(batch_size=BATCH_SIZE):
                     features_list.append(r)
             await asyncio.sleep(BATCH_DELAY)
 
-    # Run async batches safely
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
@@ -207,24 +206,29 @@ def find_top_picks_scheduler(batch_size=BATCH_SIZE):
     scored = score_from_features(features_list)
     ts = dt.utcnow().isoformat()
     current_tops = get_current_top_scores(limit=TOP_N)
+    first_run = len(current_tops) == 0
     prev_best_score = current_tops[0][1] if current_tops else 0
 
     for p in scored:
         p['ts'] = ts
         upsert_all_stock(p)
 
-    new_best = scored[0] if scored else None
-    if new_best and new_best['score'] > prev_best_score + 0.05:
-        title = f"New top pick: {new_best['symbol']}"
-        body = f"Score {round(new_best['score']*100,2)} — Price {new_best['last_price']}"
-        log_notification("new_top", new_best['symbol'], title, body)
-        if FCM_TEST_TOKEN:
-            send_push(to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": new_best['symbol']})
+    # ----------------------- First-run always save -----------------------
+    if first_run:
         save_top_picks(scored, top_n=TOP_N)
-        print("✅ Top picks updated & notified")
+        print("✅ First-run top picks saved")
     else:
-        save_top_picks(scored, top_n=TOP_N)
-        print("✅ Top picks saved (no new top beyond threshold)")
+        new_best = scored[0] if scored else None
+        if new_best and new_best['score'] > prev_best_score + 0.05:
+            title = f"New top pick: {new_best['symbol']}"
+            body = f"Score {round(new_best['score']*100,2)} — Price {new_best['last_price']}"
+            log_notification("new_top", new_best['symbol'], title, body)
+            if FCM_TEST_TOKEN:
+                send_push(to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": new_best['symbol']})
+            save_top_picks(scored, top_n=TOP_N)
+            print("✅ Top picks updated & notified")
+        else:
+            print("✅ No new top beyond threshold; top picks unchanged")
 
     return scored[:TOP_N]
 
@@ -306,3 +310,5 @@ if __name__ == "__main__":
             time.sleep(1)  # synchronous sleep to avoid asyncio warnings
     except (KeyboardInterrupt, SystemExit):
         shutdown_scheduler()
+
+
