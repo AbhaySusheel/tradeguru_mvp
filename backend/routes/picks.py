@@ -4,7 +4,6 @@ import sqlite3
 from datetime import datetime as dt
 from fastapi import APIRouter, HTTPException
 from utils.notifier import send_push
-from scheduler import send_expo_push
 
 router = APIRouter()
 
@@ -65,7 +64,9 @@ def buy_stock(payload: dict):
     if FCM_TEST_TOKEN:
         send_push(FCM_TEST_TOKEN, title, body)
     if EXPO_PUSH_TOKEN:
-        send_expo_push(EXPO_PUSH_TOKEN, title, body)
+        send_push(EXPO_PUSH_TOKEN, title, body)
+
+    
 
     return {"status": "ok", "message": "Position opened"}
 
@@ -99,6 +100,6 @@ def sell_stock(payload: dict):
     if FCM_TEST_TOKEN:
         send_push(FCM_TEST_TOKEN, title, body)
     if EXPO_PUSH_TOKEN:
-        send_expo_push(EXPO_PUSH_TOKEN, title, body)
+        send_push(EXPO_PUSH_TOKEN, title, body)
 
     return {"status": "ok", "message": "Position closed"}
