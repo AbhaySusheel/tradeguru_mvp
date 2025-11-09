@@ -6,7 +6,10 @@ const API_BASE = 'https://tradeguru-mvp.onrender.com/api';
 const API_KEY = '8f912050f8a403046ea774190bf4fa33';
 
 // ✅ Set global axios header (fix for API key issue)
-axios.defaults.headers.common['x-api-key'] = API_KEY;
+axios.interceptors.request.use((config) => {
+  config.headers["x-api-key"] = API_KEY;
+  return config;
+});
 
 export default function HomeScreen({ navigation }) {
   const [tab, setTab] = useState('Top Picks');
