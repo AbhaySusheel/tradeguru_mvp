@@ -1,15 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, FlatList, TouchableOpacity, ActivityIndicator, StyleSheet, TextInput } from 'react-native';
-import axios from 'axios';
-
-const API_BASE = 'https://tradeguru-mvp.onrender.com/api';
-const API_KEY = '8f912050f8a403046ea774190bf4fa33';
-
-// ✅ Set global axios header (fix for API key issue)
-axios.interceptors.request.use((config) => {
-  config.headers["x-api-key"] = API_KEY;
-  return config;
-});
+import api from '../api';
 
 export default function HomeScreen({ navigation }) {
   const [tab, setTab] = useState('Top Picks');
@@ -25,9 +16,9 @@ export default function HomeScreen({ navigation }) {
     try {
       setLoading(true);
       const [tops, all, pos] = await Promise.all([
-        axios.get(`${API_BASE}/top-picks`),
-        axios.get(`${API_BASE}/all-stocks`),
-        axios.get(`${API_BASE}/positions`)
+        api.get('/top-picks'),
+        api.get('/all-stocks'),
+        api.get('/positions')
       ]);
 
       setTopPicks(tops.data || []);
@@ -52,7 +43,7 @@ export default function HomeScreen({ navigation }) {
   const onBuy = async (stock) => {
     try {
       const payload = { symbol: stock.symbol, buy_price: stock.price };
-      await axios.post(`${API_BASE}/positions`, payload);
+      await api.post('/positions', payload);
       alert(`✅ Bought ${stock.symbol} @ ₹${stock.price}`);
       fetchAll();
     } catch (e) {
@@ -65,7 +56,7 @@ export default function HomeScreen({ navigation }) {
   const onSell = async (pos) => {
     try {
       const payload = { symbol: pos.symbol, sell_price: pos.current_price || pos.buy_price };
-      await axios.post(`${API_BASE}/positions/close`, payload);
+      await api.post('/positions/close', payload);
       alert(`💰 Sold ${pos.symbol}`);
       fetchAll();
     } catch (e) {
