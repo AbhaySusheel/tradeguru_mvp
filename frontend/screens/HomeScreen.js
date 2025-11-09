@@ -5,9 +5,11 @@ import axios from 'axios';
 const API_BASE = 'https://tradeguru-mvp.onrender.com/api';
 const API_KEY = '8f912050f8a403046ea774190bf4fa33';
 
+// ✅ Set global axios header (fix for API key issue)
+axios.defaults.headers.common['x-api-key'] = API_KEY;
 
 export default function HomeScreen({ navigation }) {
-  const [tab, setTab] = useState('Top Picks'); // default tab
+  const [tab, setTab] = useState('Top Picks');
   const [topPicks, setTopPicks] = useState([]);
   const [allStocks, setAllStocks] = useState([]);
   const [bought, setBought] = useState([]);
@@ -22,7 +24,7 @@ export default function HomeScreen({ navigation }) {
       const [tops, all, pos] = await Promise.all([
         axios.get(`${API_BASE}/top-picks`),
         axios.get(`${API_BASE}/all-stocks`),
-        axios.get(`${API_BASE}/positions`, { headers: { 'x-api-key': API_KEY } })
+        axios.get(`${API_BASE}/positions`)
       ]);
 
       setTopPicks(tops.data || []);
@@ -30,7 +32,7 @@ export default function HomeScreen({ navigation }) {
       setBought(pos.data.open || []);
       setSold(pos.data.closed || []);
     } catch (err) {
-      console.error(err);
+      console.error('Fetch error:', err.response?.data || err);
       setError('Error connecting to API');
     } finally {
       setLoading(false);
@@ -39,30 +41,35 @@ export default function HomeScreen({ navigation }) {
 
   useEffect(() => {
     fetchAll();
-    const timer = setInterval(fetchAll, 60000); // refresh every minute
+    const timer = setInterval(fetchAll, 60000);
     return () => clearInterval(timer);
   }, []);
 
+  // ✅ Buy
   const onBuy = async (stock) => {
-  try {
-    const payload = { symbol: stock.symbol, price: stock.price, size: 1.0, target_pct: 5.0, stop_pct: 1.5 };
-    await axios.post(`${API_BASE}/positions`, payload, { headers: { 'x-api-key': API_KEY } });
-    await fetchPositions();
-  } catch (e) {
-    console.error("Buy failed", e);
-  }
-}
+    try {
+      const payload = { symbol: stock.symbol, buy_price: stock.price };
+      await axios.post(`${API_BASE}/positions`, payload);
+      alert(`✅ Bought ${stock.symbol} @ ₹${stock.price}`);
+      fetchAll();
+    } catch (e) {
+      console.error('Buy failed', e.response?.data || e);
+      alert('Buy failed');
+    }
+  };
 
-const onSell = async (pos) => {
-  try {
-    // pos.symbol assumed
-    const payload = { symbol: pos.symbol, price: pos.current_price || pos.entry_price };
-    await axios.post(`${API_BASE}/positions/close`, payload, { headers: { 'x-api-key': API_KEY } });
-    await fetchPositions();
-  } catch (e) {
-    console.error("Sell failed", e);
-  }
-}
+  // ✅ Sell
+  const onSell = async (pos) => {
+    try {
+      const payload = { symbol: pos.symbol, sell_price: pos.current_price || pos.buy_price };
+      await axios.post(`${API_BASE}/positions/close`, payload);
+      alert(`💰 Sold ${pos.symbol}`);
+      fetchAll();
+    } catch (e) {
+      console.error('Sell failed', e.response?.data || e);
+      alert('Sell failed');
+    }
+  };
 
   const filteredStocks = allStocks.filter(s =>
     s.symbol.toLowerCase().includes(search.toLowerCase())
@@ -75,24 +82,23 @@ const onSell = async (pos) => {
     <View style={styles.card}>
       <View style={styles.row}>
         <Text style={styles.symbol}>{item.symbol}</Text>
-        <Text style={styles.price}>₹{item.price.toFixed(2)}</Text>
+        <Text style={styles.price}>₹{item.price?.toFixed(2)}</Text>
       </View>
-      <Text style={item.change >= 0 ? styles.positive : styles.negative}>
-        {item.change >= 0 ? `+${item.change.toFixed(2)}%` : `${item.change.toFixed(2)}%`}
-      </Text>
-
-      {showProfit && item.exit_price && (
+      {item.change !== undefined && (
+        <Text style={item.change >= 0 ? styles.positive : styles.negative}>
+          {item.change >= 0 ? `+${item.change.toFixed(2)}%` : `${item.change.toFixed(2)}%`}
+        </Text>
+      )}
+      {showProfit && item.profit !== undefined && (
         <Text style={item.profit >= 0 ? styles.positive : styles.negative}>
           Profit/Loss: {item.profit.toFixed(2)}%
         </Text>
       )}
-
       {showBuy && (
         <TouchableOpacity onPress={() => onBuy(item)} style={[styles.smallBtn, { backgroundColor: 'green' }]}>
           <Text style={{ color: 'white' }}>Buy</Text>
         </TouchableOpacity>
       )}
-
       {showSell && (
         <TouchableOpacity onPress={() => onSell(item)} style={[styles.smallBtn, { backgroundColor: 'red' }]}>
           <Text style={{ color: 'white' }}>Sell</Text>
@@ -130,7 +136,7 @@ const onSell = async (pos) => {
         />
       )}
 
-      {/* Content */}
+      {/* Lists */}
       {tab === 'All' && renderList(filteredStocks, false, false)}
       {tab === 'Top Picks' && renderList(topPicks, true, false)}
       {tab === 'Bought' && renderList(bought, false, true)}
@@ -141,7 +147,6 @@ const onSell = async (pos) => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 12, backgroundColor: '#fff' },
-  title: { fontSize: 22, fontWeight: 'bold', marginBottom: 10, textAlign: 'center' },
   card: { padding: 14, borderRadius: 12, backgroundColor: '#f8f9fa', marginBottom: 10, elevation: 2 },
   row: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 },
   symbol: { fontSize: 18, fontWeight: 'bold' },
