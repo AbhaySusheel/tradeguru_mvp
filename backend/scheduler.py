@@ -1,11 +1,12 @@
 # backend/scheduler.py
 """
-TradeGuru Async Scheduler - Fully safe version with first-run top picks
+TradeGuru Async Scheduler - Fully safe version with DB retry and first-run top picks
 Features:
 - Async top picks fetching with retries
 - Dynamic batching (top 500 symbols)
 - APScheduler safe shutdown
 - First-run top picks always saved
+- SQLite retry for "database is locked" issues
 """
 
 import os
@@ -36,7 +37,22 @@ CACHE_TTL = timedelta(seconds=int(os.getenv("PRICE_CACHE_TTL_SEC", "90")))
 
 # ----------------------- DB HELPERS -----------------------
 def db_conn():
-    return sqlite3.connect(DB)
+    return sqlite3.connect(DB, check_same_thread=False)
+
+def try_db_write(func, *args, retries=2, **kwargs):
+    """Retry DB write up to `retries` times, skip on failure."""
+    for attempt in range(1, retries+1):
+        try:
+            func(*args, **kwargs)
+            return True
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower():
+                print(f"⚠️ DB locked, retrying ({attempt}/{retries})...")
+                time.sleep(0.1 * attempt)
+            else:
+                print("❌ DB write error:", e)
+                break
+    return False
 
 def ensure_all_stocks_table():
     conn = db_conn()
@@ -51,36 +67,44 @@ def ensure_all_stocks_table():
     conn.close()
 
 def upsert_all_stock(s):
-    conn = db_conn()
-    c = conn.cursor()
-    c.execute("""
-      INSERT INTO all_stocks(symbol,last_price,intraday_pct,ma_diff,vol_ratio,rsi,score,ts)
-      VALUES (?,?,?,?,?,?,?,?)
-      ON CONFLICT(symbol) DO UPDATE SET
-        last_price=excluded.last_price,
-        intraday_pct=excluded.intraday_pct,
-        ma_diff=excluded.ma_diff,
-        vol_ratio=excluded.vol_ratio,
-        rsi=excluded.rsi,
-        score=excluded.score,
-        ts=excluded.ts
-    """, (s['symbol'], s['last_price'], s['intraday_pct'],
-          s.get('ma_diff',0), s.get('vol_ratio',0),
-          s.get('rsi',50), s['score'], s['ts']))
-    conn.commit()
-    conn.close()
+    def _write():
+        conn = db_conn()
+        c = conn.cursor()
+        c.execute("""
+          INSERT INTO all_stocks(symbol,last_price,intraday_pct,ma_diff,vol_ratio,rsi,score,ts)
+          VALUES (?,?,?,?,?,?,?,?)
+          ON CONFLICT(symbol) DO UPDATE SET
+            last_price=excluded.last_price,
+            intraday_pct=excluded.intraday_pct,
+            ma_diff=excluded.ma_diff,
+            vol_ratio=excluded.vol_ratio,
+            rsi=excluded.rsi,
+            score=excluded.score,
+            ts=excluded.ts
+        """, (s['symbol'], s['last_price'], s['intraday_pct'],
+              s.get('ma_diff',0), s.get('vol_ratio',0),
+              s.get('rsi',50), s['score'], s['ts']))
+        conn.commit()
+        conn.close()
+    success = try_db_write(_write)
+    if not success:
+        print(f"⚠️ Skipping DB write for {s['symbol']} due to locked DB")
 
 def save_top_picks(picks, top_n=TOP_N):
-    conn = db_conn()
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS top_picks(
-                 ts TEXT, symbol TEXT, last_price REAL, score REAL, intraday_pct REAL)""")
-    ts = dt.utcnow().isoformat()
-    for p in picks[:top_n]:
-        c.execute("INSERT INTO top_picks(ts,symbol,last_price,score,intraday_pct) VALUES (?,?,?,?,?)",
-                  (ts, p.get('symbol'), p.get('last_price'), p.get('score'), p.get('intraday_pct')))
-    conn.commit()
-    conn.close()
+    def _write():
+        conn = db_conn()
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS top_picks(
+                     ts TEXT, symbol TEXT, last_price REAL, score REAL, intraday_pct REAL)""")
+        ts = dt.utcnow().isoformat()
+        for p in picks[:top_n]:
+            c.execute("INSERT INTO top_picks(ts,symbol,last_price,score,intraday_pct) VALUES (?,?,?,?,?)",
+                      (ts, p.get('symbol'), p.get('last_price'), p.get('score'), p.get('intraday_pct')))
+        conn.commit()
+        conn.close()
+    success = try_db_write(_write)
+    if not success:
+        print("⚠️ Skipping saving top picks due to locked DB")
 
 def get_current_top_scores(limit=TOP_N):
     ensure_all_stocks_table()
@@ -92,23 +116,21 @@ def get_current_top_scores(limit=TOP_N):
     return rows
 
 def log_notification(type_, symbol, title, body):
-    conn = db_conn()
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS notifications(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, symbol TEXT, note TEXT
-                 )""")
-    ts = dt.utcnow().isoformat()
-    c.execute("INSERT INTO notifications(ts,type,symbol,note) VALUES (?,?,?,?)",
-              (ts, type_, symbol, title + " - " + body))
-    conn.commit()
-    conn.close()
+    def _write():
+        conn = db_conn()
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS notifications(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, symbol TEXT, note TEXT
+                     )""")
+        ts = dt.utcnow().isoformat()
+        c.execute("INSERT INTO notifications(ts,type,symbol,note) VALUES (?,?,?,?)",
+                  (ts, type_, symbol, title + " - " + body))
+        conn.commit()
+        conn.close()
+    try_db_write(_write)
 
 # ----------------------- LOAD UNIVERSE -----------------------
 def load_universe(csv_path=os.path.join("backend", "tickers.csv")):
-    """
-    Load live NSE symbols via nsetools, fallback to CSV.
-    Limit to top 500 symbols.
-    """
     try:
         from nsetools import Nse
         nse = Nse()
@@ -202,13 +224,13 @@ def find_top_picks_scheduler(batch_size=BATCH_SIZE):
         print("⚠️ No features computed")
         return []
 
-    # Score and update DB
     scored = score_from_features(features_list)
     ts = dt.utcnow().isoformat()
     current_tops = get_current_top_scores(limit=TOP_N)
     first_run = len(current_tops) == 0
     prev_best_score = current_tops[0][1] if current_tops else 0
 
+    # Upsert safely with retry
     for p in scored:
         p['ts'] = ts
         upsert_all_stock(p)
@@ -257,14 +279,18 @@ def monitor_positions_job():
             if cached and now - cached[0] < CACHE_TTL:
                 current = cached[1]['last_price']
             else:
-                df = fetch_intraday(sym+".NS", period="1d", interval="1m")
-                feats = compute_features(df)
-                current = feats['last_price'] if feats else (df['Close'].iloc[-1] if len(df)>0 else None)
-                if feats:
-                    feats['symbol'] = sym
-                    feats['last_price'] = current
-                    feats['ts'] = now.isoformat()
-                    _PRICE_CACHE[sym] = (now, feats)
+                try:
+                    df = fetch_intraday(sym+".NS", period="1d", interval="1m")
+                    feats = compute_features(df)
+                    current = feats['last_price'] if feats else (df['Close'].iloc[-1] if len(df)>0 else None)
+                    if feats:
+                        feats['symbol'] = sym
+                        feats['last_price'] = current
+                        feats['ts'] = now.isoformat()
+                        _PRICE_CACHE[sym] = (now, feats)
+                except Exception as e:
+                    print(f"fetch_intraday error {sym}: {e}")
+                    continue
 
             if current is None:
                 continue
