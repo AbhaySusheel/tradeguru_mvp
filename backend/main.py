@@ -14,8 +14,7 @@ from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
 import os
 
-API_KEY = os.getenv("API_KEY", "8f912050f8a403046ea774190bf4fa33")
-
+API_KEY = os.getenv("API_KEY")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +37,8 @@ app = FastAPI(title="TradeGuru API", lifespan=lifespan)
 async def verify_api_key(request: Request, call_next):
     if request.url.path.startswith("/api/positions"):
         header_key = request.headers.get("x-api-key")
+        print("🔍 Expected API_KEY:", API_KEY)
+        print("🔍 Got header:", header_key)
         if header_key != API_KEY:
             return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
     return await call_next(request)
