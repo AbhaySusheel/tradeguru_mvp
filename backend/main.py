@@ -2,7 +2,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from routes.stocks import router as stocks_router
 from routes.picks import router as picks_router
 from routes.positions import router as positions_router
@@ -10,6 +10,20 @@ from db_init import init_db
 
 from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
+import os
+
+API_KEY = os.getenv("API_KEY", "8f912050f8a403046ea774190bf4fa33")
+
+@app.middleware("http")
+async def verify_api_key(request: Request, call_next):
+    # Only protect /api/positions and /api/positions/close endpoints
+    if request.url.path.startswith("/api/positions"):
+        key = request.headers.get("x-api-key")
+        if key != API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    response = await call_next(request)
+    return response
+
 
 
 @asynccontextmanager
