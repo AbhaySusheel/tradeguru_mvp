@@ -21,12 +21,14 @@ async def lifespan(app: FastAPI):
     print("🗄 Initializing database...")
     init_db()
 
-    start_scheduler()
+    #start_scheduler()
     print("🚀 Running top stock finder once at startup...")
     try:
-        find_top_picks_scheduler()
+    #   find_top_picks_scheduler()
     except Exception as e:
         print("Startup top picks run failed:", e)
+    print("✅ TradeGuru API starting on port:", os.getenv("PORT"))
+    
     yield
 
 app = FastAPI(title="TradeGuru API", lifespan=lifespan)
