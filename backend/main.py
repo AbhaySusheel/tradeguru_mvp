@@ -11,8 +11,7 @@ from db_init import init_db
 from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
 import os
-import uvicorn
-
+from datetime import datetime, timezone
 
 API_KEY = os.getenv("API_KEY")
 
@@ -31,7 +30,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TradeGuru API", lifespan=lifespan)
 
-# ✅ Allow frontend to send x-api-key via CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -56,9 +54,5 @@ app.include_router(positions_router, prefix="/api")
 
 @app.get("/")
 def root():
-    return {"status": "TradeGuru API running"}
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")    
+    now = datetime.now(timezone.utc)
+    return {"status": "TradeGuru API running", "utc_time": now.isoformat()}
