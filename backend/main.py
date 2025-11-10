@@ -11,7 +11,8 @@ from db_init import init_db
 from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
 import os
-from datetime import datetime, timezone
+
+
 
 API_KEY = os.getenv("API_KEY")
 
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TradeGuru API", lifespan=lifespan)
 
+# ✅ Allow frontend to send x-api-key via CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,5 +56,6 @@ app.include_router(positions_router, prefix="/api")
 
 @app.get("/")
 def root():
-    now = datetime.now(timezone.utc)
-    return {"status": "TradeGuru API running", "utc_time": now.isoformat()}
+    return {"status": "TradeGuru API running"}
+
+
