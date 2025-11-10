@@ -24,6 +24,7 @@ async def lifespan(app: FastAPI):
     #start_scheduler()
     print("🚀 Running top stock finder once at startup...")
     try:
+        pass 
     #   find_top_picks_scheduler()
     except Exception as e:
         print("Startup top picks run failed:", e)
