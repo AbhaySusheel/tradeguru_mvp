@@ -23,6 +23,7 @@ from utils.market import fetch_intraday, compute_features
 from utils.score import score_from_features
 from utils.notifier import send_push
 from utils.positions import open_position, close_position, list_open_positions
+from datetime import datetime, timezone
 
 # ----------------------- CONFIG -----------------------
 DB = os.getenv("DB_PATH", "app.db")
@@ -163,7 +164,8 @@ def load_universe(csv_path=os.path.join("backend", "tickers.csv")):
 
 # ----------------------- ASYNC FETCH -----------------------
 async def _fetch_and_compute(symbol: str, interval="5m", period="1d", retries=3, backoff=2):
-    now = dt.utcnow()
+    
+    now = datetime.now(timezone.utc)
     cached = _PRICE_CACHE.get(symbol)
     if cached and now - cached[0] < CACHE_TTL:
         return cached[1]
