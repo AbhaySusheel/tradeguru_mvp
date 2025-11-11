@@ -15,6 +15,8 @@ import os
 import time
 import sqlite3
 import asyncio
+import firebase_admin
+from firebase_admin import credentials, firestore
 from datetime import datetime as dt, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +42,12 @@ _PRICE_CACHE = {}
 CACHE_TTL = timedelta(seconds=int(os.getenv("PRICE_CACHE_TTL_SEC", "90")))
 
 # ----------------------- DB HELPERS -----------------------
+if not firebase_admin._apps:
+    cred = credentials.Certificate("firebase_key.json")
+    firebase_admin.initialize_app(cred)
+
+db_firestore = firestore.client()
+
 def db_conn():
     return sqlite3.connect(DB, check_same_thread=False)
 
@@ -95,20 +103,23 @@ def upsert_all_stock(s):
         print(f"⚠️ Skipping DB write for {s['symbol']} due to locked DB")
 
 def save_top_picks(picks, top_n=TOP_N):
-    def _write():
-        conn = db_conn()
-        c = conn.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS top_picks(
-                     ts TEXT, symbol TEXT, last_price REAL, score REAL, intraday_pct REAL)""")
-        ts_val = dt.utcnow().isoformat()
-        for p in picks[:top_n]:
-            c.execute("INSERT INTO top_picks(ts,symbol,last_price,score,intraday_pct) VALUES (?,?,?,?,?)",
-                      (ts_val, p.get('symbol'), p.get('last_price'), p.get('score'), p.get('intraday_pct')))
-        conn.commit()
-        conn.close()
-    success = try_db_write(_write)
-    if not success:
-        print("⚠️ Skipping saving top picks due to locked DB")
+    """Save top picks to Firebase Firestore."""
+    ts_val = dt.utcnow().isoformat()
+    docs = []
+    for p in picks[:top_n]:
+        docs.append({
+            "ts": ts_val,
+            "symbol": p.get("symbol"),
+            "last_price": p.get("last_price"),
+            "score": p.get("score"),
+            "intraday_pct": p.get("intraday_pct")
+        })
+    try:
+        doc_ref = db_firestore.collection("top_picks").document("latest")
+        doc_ref.set({"timestamp": ts_val, "data": docs})
+        print("✅ Top picks saved to Firebase")
+    except Exception as e:
+        print("❌ Failed to save top picks to Firebase:", e)
 
 def get_current_top_scores(limit=TOP_N):
     ensure_all_stocks_table()
