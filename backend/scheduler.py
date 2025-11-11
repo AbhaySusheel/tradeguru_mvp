@@ -195,73 +195,7 @@ async def _fetch_and_compute(symbol: str, interval="5m", period="1d", retries=3,
     return None
 
 # ----------------------- TOP PICKS SCHEDULER -----------------------
-def find_top_picks_scheduler(batch_size=BATCH_SIZE):
-    ensure_all_stocks_table()
-    universe = load_universe()
-    if not universe:
-        print("⚠️ No tickers found")
-        return []
 
-    print(f"🔁 Running top picks for {len(universe)} tickers")
-    features_list = []
-
-    async def run_batches():
-        for i in range(0, len(universe), batch_size):
-            batch = universe[i:i+batch_size]
-            tasks = [_fetch_and_compute(sym, interval="5m", period="1d") for sym in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in results:
-                if isinstance(r, Exception):
-                    print("Batch fetch exception:", r)
-                elif r:
-                    features_list.append(r)
-            await asyncio.sleep(BATCH_DELAY)
-
-    # ✅ Async-safe event loop handling for Render deployment
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(run_batches(), loop)
-            future.result()
-        else:
-            loop.run_until_complete(run_batches())
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(run_batches())
-
-    if not features_list:
-        print("⚠️ No features computed")
-        return []
-
-    scored = score_from_features(features_list)
-    ts_val = dt.utcnow().isoformat()
-    current_tops = get_current_top_scores(limit=TOP_N)
-    first_run = len(current_tops) == 0
-    prev_best_score = current_tops[0][1] if current_tops else 0
-
-    for p in scored:
-        p['ts'] = ts_val
-        upsert_all_stock(p)
-
-    # ----------------------- First-run always save -----------------------
-    if first_run:
-        save_top_picks(scored, top_n=TOP_N)
-        print("✅ First-run top picks saved")
-    else:
-        new_best = scored[0] if scored else None
-        if new_best and new_best['score'] > prev_best_score + 0.05:
-            title = f"New top pick: {new_best['symbol']}"
-            body = f"Score {round(new_best['score']*100,2)} — Price {new_best['last_price']}"
-            log_notification("new_top", new_best['symbol'], title, body)
-            if FCM_TEST_TOKEN:
-                send_push(to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": new_best['symbol']})
-            save_top_picks(scored, top_n=TOP_N)
-            print("✅ Top picks updated & notified")
-        else:
-            print("✅ No new top beyond threshold; top picks unchanged")
-
-    return scored[:TOP_N]
 
 # ----------------------- POSITION MONITOR -----------------------
 def evaluate_and_maybe_open(picks):
@@ -323,10 +257,90 @@ def monitor_positions_job():
         except Exception as e:
             print("monitor error for", sym, e)
 
+# ----------------------- TOP PICKS SCHEDULER -----------------------
+def run_async_safe(coro):
+    """Run any coroutine safely from APScheduler or main thread."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    if loop.is_running():
+        # Already running (e.g., inside FastAPI or Render)
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
+    else:
+        return loop.run_until_complete(coro)
+
+
+def find_top_picks_scheduler(batch_size=BATCH_SIZE):
+    ensure_all_stocks_table()
+    universe = load_universe()
+    if not universe:
+        print("⚠️ No tickers found")
+        return []
+
+    print(f"🔁 Running top picks for {len(universe)} tickers")
+    features_list = []
+
+    async def run_batches():
+        for i in range(0, len(universe), batch_size):
+            batch = universe[i:i+batch_size]
+            tasks = [_fetch_and_compute(sym, interval="5m", period="1d") for sym in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    print("Batch fetch exception:", r)
+                elif r:
+                    features_list.append(r)
+            await asyncio.sleep(BATCH_DELAY)
+
+    # ✅ async-safe call
+    run_async_safe(run_batches())
+
+    if not features_list:
+        print("⚠️ No features computed")
+        return []
+
+    scored = score_from_features(features_list)
+    ts_val = dt.utcnow().isoformat()
+    current_tops = get_current_top_scores(limit=TOP_N)
+    first_run = len(current_tops) == 0
+    prev_best_score = current_tops[0][1] if current_tops else 0
+
+    for p in scored:
+        p['ts'] = ts_val
+        upsert_all_stock(p)
+
+    if first_run:
+        save_top_picks(scored, top_n=TOP_N)
+        print("✅ First-run top picks saved")
+    else:
+        new_best = scored[0] if scored else None
+        if new_best and new_best['score'] > prev_best_score + 0.05:
+            title = f"New top pick: {new_best['symbol']}"
+            body = f"Score {round(new_best['score']*100,2)} — Price {new_best['last_price']}"
+            log_notification("new_top", new_best['symbol'], title, body)
+            if FCM_TEST_TOKEN:
+                send_push(to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": new_best['symbol']})
+            save_top_picks(scored, top_n=TOP_N)
+            print("✅ Top picks updated & notified")
+        else:
+            print("✅ No new top beyond threshold; top picks unchanged")
+
+    return scored[:TOP_N]
+
 # ----------------------- SCHEDULER -----------------------
 scheduler = BackgroundScheduler()
 
 def start_scheduler():
+    # Prevent multiple schedulers on Render
+    if getattr(start_scheduler, "_started", False):
+        print("⚠️ Scheduler already started, skipping duplicate.")
+        return
+    start_scheduler._started = True
+
     scheduler.add_job(find_top_picks_scheduler, 'interval', minutes=TOPPICKS_INTERVAL_MIN, next_run_time=dt.utcnow())
     scheduler.add_job(monitor_positions_job, 'interval', minutes=MONITOR_INTERVAL_MIN, next_run_time=dt.utcnow())
     scheduler.start()
