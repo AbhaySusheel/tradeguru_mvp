@@ -10,6 +10,7 @@ from routes.positions import router as positions_router
 from db_init import init_db
 from scheduler import start_scheduler, find_top_picks_scheduler
 from contextlib import asynccontextmanager
+from scheduler import run_top_picks_once
 import os
 
 
@@ -24,7 +25,7 @@ async def lifespan(app: FastAPI):
     #start_scheduler()
     print("🚀 Running top stock finder once at startup...")
     try:
-        pass 
+        pass    
     #   find_top_picks_scheduler()
     except Exception as e:
         print("Startup top picks run failed:", e)
@@ -61,4 +62,10 @@ app.include_router(positions_router, prefix="/api")
 def root():
     return {"status": "TradeGuru API running"}
 
-
+@app.on_event("startup")
+async def run_startup_tasks():
+    print("🚀 Running top stock finder once at startup...")
+    try:
+        run_top_picks_once()
+    except Exception as e:
+        print("⚠️ Error running top picks on startup:", e)
