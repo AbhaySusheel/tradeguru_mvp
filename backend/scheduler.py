@@ -366,6 +366,44 @@ def shutdown_scheduler():
     print("🛑 Scheduler stopped safely.")
 
 
+def compute_top_picks():
+    ensure_all_stocks_table()
+    universe = load_universe()
+    if not universe:
+        print("⚠️ No tickers found for top picks")
+        return []
+
+    print(f"🔎 Computing top picks for {len(universe)} tickers...")
+    features_list = []
+
+    # Run async-safe fetching (same logic as your scheduler)
+    async def run_batches():
+        for i in range(0, len(universe), BATCH_SIZE):
+            batch = universe[i:i + BATCH_SIZE]
+            tasks = [_fetch_and_compute(sym, interval="5m", period="1d") for sym in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    print("Batch error:", r)
+                elif r:
+                    features_list.append(r)
+            await asyncio.sleep(BATCH_DELAY)
+
+    run_async_safe(run_batches())
+
+    if not features_list:
+        print("⚠️ No features computed")
+        return []
+
+    # Score the stocks
+    scored = score_from_features(features_list)
+    ts_val = dt.utcnow().isoformat()
+    for p in scored:
+        p['ts'] = ts_val
+        upsert_all_stock(p)
+
+    print("✅ Computed and stored latest stock data")
+    return scored
 
 def run_top_picks_once():
     print("🔁 Running top picks once (startup)")

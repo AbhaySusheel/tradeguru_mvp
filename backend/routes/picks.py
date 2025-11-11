@@ -5,10 +5,10 @@ from datetime import datetime as dt
 from fastapi import APIRouter, HTTPException
 from scheduler import db_conn
 from utils.notifier import send_push
-
+from scheduler import run_top_picks_once
 from firebase_admin import firestore
 
-
+CRON_SECRET = os.getenv("CRON_SECRET", "my_secret_token")
 router = APIRouter()
 
 EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN", "")
@@ -111,3 +111,17 @@ def sell_stock(payload: dict):
         send_push(EXPO_PUSH_TOKEN, title, body)
 
     return {"status": "ok", "message": "Position closed"}
+
+
+@router.get("/update-top-picks")
+def update_top_picks(token: str):
+    """Trigger top picks update manually or via external cron."""
+    if token != CRON_SECRET:
+        return {"status": "error", "message": "Unauthorized"}
+
+    try:
+        run_top_picks_once()
+        return {"status": "ok", "message": "Top picks updated successfully"}
+    except Exception as e:
+        print("⚠️ Error in manual update:", e)
+        return {"status": "error", "message": str(e)}    
