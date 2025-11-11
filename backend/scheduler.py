@@ -313,11 +313,11 @@ def find_top_picks_scheduler(batch_size=BATCH_SIZE):
         p['ts'] = ts_val
         upsert_all_stock(p)
 
-    if first_run:
+    if first_run or prev_best_score == 0:
         save_top_picks(scored, top_n=TOP_N)
-        print("✅ First-run top picks saved")
+        print("✅ Initial top picks saved (first run or reset)")
     else:
-        new_best = scored[0] if scored else None
+        new_best = scored[0] 
         if new_best and new_best['score'] > prev_best_score + 0.05:
             title = f"New top pick: {new_best['symbol']}"
             body = f"Score {round(new_best['score']*100,2)} — Price {new_best['last_price']}"
