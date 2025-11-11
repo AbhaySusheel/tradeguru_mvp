@@ -365,6 +365,18 @@ def shutdown_scheduler():
     scheduler.shutdown(wait=True)
     print("🛑 Scheduler stopped safely.")
 
+
+
+def run_top_picks_once():
+    print("🔁 Running top picks once (startup)")
+    scored = compute_top_picks()
+    if not scored:
+        print("⚠️ No valid scores, skipping save.")
+        return
+    save_top_picks(scored, top_n=TOP_N)
+    print("✅ Top picks saved to Firebase")
+
+
 # ----------------------- STANDALONE RUN -----------------------
 if __name__ == "__main__":
     print("🚀 TradeGuru Standalone Scheduler Starting...")
