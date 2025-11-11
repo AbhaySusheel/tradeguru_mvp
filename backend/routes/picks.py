@@ -6,6 +6,9 @@ from fastapi import APIRouter, HTTPException
 from scheduler import db_conn
 from utils.notifier import send_push
 
+from firebase_admin import firestore
+
+
 router = APIRouter()
 
 EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN", "")
@@ -13,35 +16,19 @@ FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 
 @router.get("/top-picks")
 def top_picks(limit: int = 10):
-    """
-    Return latest top picks from DB.
-    Excludes positions already OPEN.
-    Safe: returns data even if scheduler is still running.
-    """
+    """Return latest top picks from Firebase Firestore."""
     try:
-        conn = db_conn()
-        c = conn.cursor()
-        c.execute("""
-            SELECT tp.symbol, tp.last_price, tp.score, tp.intraday_pct, tp.ts
-            FROM top_picks tp
-            WHERE tp.symbol NOT IN (SELECT symbol FROM all_stocks WHERE 1=0)  -- keep structure safe
-            ORDER BY tp.ts DESC, tp.score DESC
-            LIMIT ?
-        """, (limit,))
-        rows = c.fetchall()
-        conn.close()
+        db_firestore = firestore.client()
+        doc_ref = db_firestore.collection("top_picks").document("latest")
+        doc = doc_ref.get()
 
-        picks = [
-            {
-                "symbol": r[0],
-                "price": r[1],
-                "score": r[2],
-                "change": r[3],
-                "ts": r[4]
-            }
-            for r in rows
-        ]
-        return {"top_picks": picks}
+        if not doc.exists:
+            print("⚠️ No top picks found in Firebase")
+            return {"top_picks": []}
+
+        data = doc.to_dict().get("data", [])
+        # Limit number of results if needed
+        return {"top_picks": data[:limit]}
 
     except Exception as e:
         print("⚠️ Error fetching top picks:", e)
