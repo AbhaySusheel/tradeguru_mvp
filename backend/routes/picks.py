@@ -115,13 +115,20 @@ def sell_stock(payload: dict):
 
 
 
+# backend/routes/picks.py (Correction)
+
 @router.get("/update-top-picks")
 async def update_top_picks(token: str, background_tasks: BackgroundTasks):
-    # ... token check
+    # ... token check logic (if it exists)
+
     try:
-        # FastAPI will correctly schedule the async function
-        background_tasks.add_task(run_top_picks_once) # <--- This is now an async def function
-        
-        # This returns instantly, unblocking the main worker
+        background_tasks.add_task(run_top_picks_once)
         return {"status": "ok", "message": "Top picks update STARTED successfully"}
-    # ...
+
+    except Exception as e: # <--- ADD THIS BLOCK
+        print(f"Error starting top picks task: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to start task: {e}"
+        )
+    # The error is fixed because the 'try' block is now complete.
