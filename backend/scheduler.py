@@ -269,21 +269,32 @@ def monitor_positions_job():
             print("monitor error for", sym, e)
 
 # ----------------------- TOP PICKS SCHEDULER -----------------------
+# backend/scheduler.py
+
+# ... (around line 348)
+
 def run_async_safe(coro):
     """Run any coroutine safely from APScheduler or main thread."""
+    # When this is called from a synchronous context (like APScheduler or 
+    # a BackgroundTasks thread), asyncio.run() creates a temporary loop 
+    # and runs the coroutine, preventing the thread from blocking indefinitely 
+    # while waiting on a different loop.
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Use asyncio.run which is the standard way to run a top-level coroutine 
+        # from synchronous code, ensuring a new loop is created if needed.
+        return asyncio.run(coro)
+    except Exception as e:
+        print(f"❌ Error during asyncio.run in run_async_safe: {e}")
+        return None # or re-raise if you want the outer function to fail
 
-    if loop.is_running():
-        # Already running (e.g., inside FastAPI or Render)
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result()
-    else:
-        return loop.run_until_complete(coro)
-
+# You can delete the entire original `run_async_safe` function body, 
+# especially the part with `future.result()` which caused the block/timeout.
+# Original blocking logic:
+# if loop.is_running():
+#     future = asyncio.run_coroutine_threadsafe(coro, loop)
+#     return future.result() # ⚠️ THIS IS THE BLOCKING CODE!
+# else:
+#     return loop.run_until_complete(coro)
 
 def find_top_picks_scheduler(batch_size=BATCH_SIZE):
     ensure_all_stocks_table()
