@@ -117,18 +117,11 @@ def sell_stock(payload: dict):
 
 @router.get("/update-top-picks")
 async def update_top_picks(token: str, background_tasks: BackgroundTasks):
-    """Trigger top picks update manually or via external cron."""
-    if token != CRON_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
+    # ... token check
     try:
-        # ✅ Add the long-running function to the background
-        # Note: We must use the synchronous version of the function here
-        background_tasks.add_task(run_top_picks_once) 
+        # FastAPI will correctly schedule the async function
+        background_tasks.add_task(run_top_picks_once) # <--- This is now an async def function
         
-        # ✅ Return the successful response IMMEDIATELY
+        # This returns instantly, unblocking the main worker
         return {"status": "ok", "message": "Top picks update STARTED successfully"}
-    except Exception as e:
-        print("⚠️ Error starting manual update task:", e)
-        # This error is from adding the task, not the task itself
-        return {"status": "error", "message": "Failed to start update task: " + str(e)}
+    # ...
