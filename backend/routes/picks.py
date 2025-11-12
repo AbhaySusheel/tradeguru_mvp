@@ -7,7 +7,9 @@ from scheduler import db_conn
 from utils.notifier import send_push
 from scheduler import run_top_picks_once
 from firebase_admin import firestore
-
+from google.cloud.firestore_v1.base_document import DocumentSnapshot
+# Import specific error for better handling
+from google.api_core.exceptions import DeadlineExceeded 
 
 CRON_SECRET = os.getenv("CRON_SECRET", "my_secret_token")
 router = APIRouter()
@@ -15,30 +17,42 @@ router = APIRouter()
 EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN", "")
 FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 
+# -------------------- HELPER FOR BLOCKING FIREBASE CALL --------------------
+
+def _get_top_picks_data_sync(limit: int):
+    """Synchronously fetches data from Firestore. This function will be run in a separate thread."""
+    db_firestore = firestore.client()
+    doc_ref = db_firestore.collection("top_picks").document("latest")
+    
+    # Still use a timeout. If the connection fails, this will throw DeadlineExceeded.
+    doc: DocumentSnapshot = doc_ref.get(timeout=5) 
+
+    if not doc.exists:
+        return {"top_picks": [], "message": "No data available yet."}
+
+    data = doc.to_dict().get("data", [])
+    return {"top_picks": data[:limit]}
+
+# ------------------------- ASYNC ROUTE -------------------------
+
 @router.get("/top-picks")
-def top_picks(limit: int = 10):
-    """Return latest top picks from Firebase Firestore."""
+async def top_picks(limit: int = 10):
+    """Return latest top picks from Firebase Firestore using async thread."""
     try:
-        db_firestore = firestore.client()
-        doc_ref = db_firestore.collection("top_picks").document("latest")
-        
-        # CRITICAL FIX: Add a timeout to the synchronous call (e.g., 5 seconds)
-        # to ensure the request does not hang forever if Firestore is slow or blocked.
-        # Note: 'timeout' argument is supported in google-cloud-firestore
-        doc: DocumentSnapshot = doc_ref.get(timeout=5)
+        # Use asyncio.to_thread to run the blocking synchronous function 
+        # in a separate thread, protecting the main event loop from hanging.
+        result = await asyncio.to_thread(_get_top_picks_data_sync, limit)
+        return result
 
-        if not doc.exists:
-            print("⚠️ No top picks found in Firebase")
-            return {"top_picks": [], "message": "No data available yet."}
-
-        # Ensure data is returned cleanly
-        data = doc.to_dict().get("data", [])
-        
-        return {"top_picks": data[:limit]}
-
+    except DeadlineExceeded as e:
+        print(f"⚠️ Firestore read timeout (DeadlineExceeded): {e}")
+        # 504 Gateway Timeout is the most appropriate status for an external API timeout.
+        raise HTTPException(
+            status_code=504, 
+            detail="Failed to fetch data: External API timeout (Firestore)."
+        )
     except Exception as e:
-        print(f"⚠️ Error fetching top picks from Firestore (Timeout or Error): {e}")
-        # Return a quick, non-hanging error response
+        print(f"⚠️ Unexpected error fetching top picks: {e}")
         raise HTTPException(
             status_code=503, 
             detail=f"Service unavailable: Failed to fetch data. Error: {e}"
