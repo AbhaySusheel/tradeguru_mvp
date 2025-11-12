@@ -181,7 +181,7 @@ def load_universe(csv_path=os.path.join("backend", "tickers.csv")):
         elif isinstance(all_stock_codes, list):
             universe = [sym + ".NS" for sym in all_stock_codes if sym != 'SYMBOL']
         if universe:
-            universe = universe[:500]
+            universe = universe[:50]
             print(f"✅ {len(universe)} symbols loaded for top picks")
             return universe
         else:
