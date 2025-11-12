@@ -1,6 +1,7 @@
 # backend/routes/picks.py
 import os
 import sqlite3
+import asyncio
 from datetime import datetime as dt
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from scheduler import db_conn
