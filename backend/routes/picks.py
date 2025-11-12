@@ -2,11 +2,12 @@
 import os
 import sqlite3
 from datetime import datetime as dt
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from scheduler import db_conn
 from utils.notifier import send_push
 from scheduler import run_top_picks_once
 from firebase_admin import firestore
+
 
 CRON_SECRET = os.getenv("CRON_SECRET", "my_secret_token")
 router = APIRouter()
