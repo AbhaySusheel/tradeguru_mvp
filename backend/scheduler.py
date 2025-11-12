@@ -14,32 +14,37 @@ import os
 import time
 import sqlite3
 import asyncio
+import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime as dt, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor
 import json # <-- Added for JSON loading
-
+from apscheduler.schedulers.background import BackgroundScheduler
+import time
 from utils.market import fetch_intraday, compute_features
 from utils.score import score_from_features
 from utils.notifier import send_push
 from utils.positions import open_position, close_position, list_open_positions
 from datetime import datetime, timezone
 
+
 # ----------------------- CONFIG -----------------------
 DB = os.getenv("DB_PATH", "app.db")
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "60"))
-BATCH_DELAY = float(os.getenv("BATCH_DELAY_SEC", "1.5"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "40"))
+BATCH_DELAY = float(os.getenv("BATCH_DELAY_SEC", "3.0"))
 TOP_N = int(os.getenv("TOP_N", "5"))
 DEFAULT_TARGET_PCT = float(os.getenv("DEFAULT_TARGET_PCT", "5.0"))
 DEFAULT_STOP_PCT = float(os.getenv("DEFAULT_STOP_PCT", "1.5"))
 TOPPICKS_INTERVAL_MIN = int(os.getenv("TOPPICKS_INTERVAL_MIN", "15"))
-MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "1"))
+MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "2"))
 FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 
 _PRICE_CACHE = {}
 CACHE_TTL = timedelta(seconds=int(os.getenv("PRICE_CACHE_TTL_SEC", "90")))
+
+
 
 # ----------------------- DB HELPERS / FIREBASE INIT (CRITICAL CHANGE) -----------------------
 if not firebase_admin._apps:
@@ -375,20 +380,34 @@ def run_top_picks_async_wrapper():
         print(f"❌ Error running scheduled top picks job: {e}")
 
 def start_scheduler():
-    # Prevent multiple schedulers on Render
-    if getattr(start_scheduler, "_started", False):
-        print("⚠️ Scheduler already started, skipping duplicate.")
+    # Use scheduler.running check for robust prevention of duplicate startups
+    if scheduler.running:
+        print("⚠️ Scheduler already running, skipping duplicate start.")
         return
-    start_scheduler._started = True
-
-    # Use the synchronous wrapper for the scheduled job
-    #scheduler.add_job(run_top_picks_async_wrapper, 'interval', minutes=TOPPICKS_INTERVAL_MIN, next_run_time=dt.utcnow())
-    scheduler.add_job(run_top_picks_async_wrapper, 'interval', minutes=TOPPICKS_INTERVAL_MIN)
-    scheduler.add_job(monitor_positions_job, 'interval', minutes=MONITOR_INTERVAL_MIN, next_run_time=dt.utcnow())
+    
+    # 1. Top Picks Job (Runs every 15 minutes)
+    # CRITICAL CHANGE: Removed next_run_time=dt.utcnow(). 
+    # This allows the initial blocking run in main.py to complete 
+    # before the recurring job starts its first interval.
+    scheduler.add_job(
+        run_top_picks_async_wrapper, 
+        'interval', 
+        minutes=TOPPICKS_INTERVAL_MIN
+    )
+    
+    # 2. Position Monitoring Job (Runs immediately and then every 5 minutes)
+    scheduler.add_job(
+        monitor_positions_job, 
+        'interval', 
+        minutes=MONITOR_INTERVAL_MIN, 
+        next_run_time=dt.utcnow()
+    )
+    
     scheduler.start()
     print("✅ Scheduler started: monitoring + top picks active.")
 
 def shutdown_scheduler():
+    # Gracefully shut down the scheduler
     scheduler.shutdown(wait=True)
     print("🛑 Scheduler stopped safely.")
 
@@ -398,7 +417,9 @@ if __name__ == "__main__":
     print("🚀 TradeGuru Standalone Scheduler Starting...")
     start_scheduler()
     try:
+        # Keep the main thread alive so the background scheduler can run
         while True:
             time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
+        # Handle graceful exit
         shutdown_scheduler()
