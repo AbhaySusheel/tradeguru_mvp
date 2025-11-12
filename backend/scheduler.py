@@ -6,9 +6,8 @@ Features:
 - Async top picks fetching with retries
 - Dynamic batching (top 500 symbols)
 - APScheduler safe shutdown
-- First-run top picks always saved
+- Firebase credentials loaded from ENV var (secure)
 - SQLite retry for "database is locked" issues
-- Handles already running event loop on Render
 """
 
 import os
@@ -20,6 +19,7 @@ from firebase_admin import credentials, firestore
 from datetime import datetime as dt, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor
+import json # <-- Added for JSON loading
 
 from utils.market import fetch_intraday, compute_features
 from utils.score import score_from_features
@@ -41,10 +41,34 @@ FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 _PRICE_CACHE = {}
 CACHE_TTL = timedelta(seconds=int(os.getenv("PRICE_CACHE_TTL_SEC", "90")))
 
-# ----------------------- DB HELPERS -----------------------
+# ----------------------- DB HELPERS / FIREBASE INIT (CRITICAL CHANGE) -----------------------
 if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase_key.json")
-    firebase_admin.initialize_app(cred)
+    json_creds = os.getenv("FIREBASE_CREDENTIALS_JSON")
+
+    if json_creds:
+        try:
+            # Load credentials from the JSON string content provided in the environment variable
+            cred = credentials.Certificate(json.loads(json_creds))
+            firebase_admin.initialize_app(cred)
+            print("✅ Firebase initialized from Environment JSON")
+        except Exception as e:
+            # Fallback if ENV variable is corrupt
+            print(f"❌ Failed to initialize Firebase from JSON ENV: {e}")
+            try:
+                # Fallback to local file for development if ENV fails
+                cred = credentials.Certificate("firebase_key.json")
+                firebase_admin.initialize_app(cred)
+                print("✅ Firebase initialized from local file (Fallback)")
+            except Exception as e2:
+                print(f"❌ Failed to initialize Firebase from local file: {e2}")
+    else:
+        # If no ENV var is set, try local file
+        try:
+            cred = credentials.Certificate("firebase_key.json")
+            firebase_admin.initialize_app(cred)
+            print("✅ Firebase initialized from local file: firebase_key.json")
+        except Exception as e:
+            print(f"❌ Failed to initialize Firebase: {e}")
 
 db_firestore = firestore.client()
 
@@ -135,8 +159,8 @@ def log_notification(type_, symbol, title, body):
         conn = db_conn()
         c = conn.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS notifications(
-                        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, symbol TEXT, note TEXT
-                     )""")
+                         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, symbol TEXT, note TEXT
+                       )""")
         ts_val = dt.utcnow().isoformat()
         c.execute("INSERT INTO notifications(ts,type,symbol,note) VALUES (?,?,?,?)",
                   (ts_val, type_, symbol, title + " - " + body))
@@ -183,8 +207,9 @@ async def _fetch_and_compute(symbol: str, interval="5m", period="1d", retries=3,
 
     for attempt in range(1, retries+1):
         try:
+            # Use asyncio.to_thread for synchronous I/O-bound operations
             df = await asyncio.to_thread(fetch_intraday, symbol if symbol.endswith(".NS") else symbol+".NS",
-                                         period=period, interval=interval)
+                                          period=period, interval=interval)
             feats = await asyncio.to_thread(compute_features, df)
             if feats:
                 feats['symbol'] = symbol.replace(".NS", "")
@@ -204,9 +229,6 @@ async def _fetch_and_compute(symbol: str, interval="5m", period="1d", retries=3,
                 break
     print(f"❌ Failed to fetch {symbol} after {retries} attempts")
     return None
-
-# ----------------------- TOP PICKS SCHEDULER -----------------------
-
 
 # ----------------------- POSITION MONITOR -----------------------
 def evaluate_and_maybe_open(picks):
@@ -268,100 +290,9 @@ def monitor_positions_job():
         except Exception as e:
             print("monitor error for", sym, e)
 
-# ----------------------- TOP PICKS SCHEDULER -----------------------
-# backend/scheduler.py
+# ----------------------- REMOVED find_top_picks_scheduler & run_async_safe -----------------------
 
-# ... (around line 348)
-
-
-
-def find_top_picks_scheduler(batch_size=BATCH_SIZE):
-    ensure_all_stocks_table()
-    universe = load_universe()
-    if not universe:
-        print("⚠️ No tickers found")
-        return []
-
-    print(f"🔁 Running top picks for {len(universe)} tickers")
-    features_list = []
-
-    async def run_batches():
-        for i in range(0, len(universe), batch_size):
-            batch = universe[i:i+batch_size]
-            tasks = [_fetch_and_compute(sym, interval="5m", period="1d") for sym in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in results:
-                if isinstance(r, Exception):
-                    print("Batch fetch exception:", r)
-                elif r:
-                    features_list.append(r)
-            await asyncio.sleep(BATCH_DELAY)
-
-    # ✅ async-safe call
-    run_async_safe(run_batches())
-
-    if not features_list:
-        print("⚠️ No features computed")
-        return []
-
-    scored = score_from_features(features_list)
-    ts_val = dt.utcnow().isoformat()
-    current_tops = get_current_top_scores(limit=TOP_N)
-    first_run = len(current_tops) == 0
-    prev_best_score = current_tops[0][1] if current_tops else 0
-
-    for p in scored:
-        p['ts'] = ts_val
-        upsert_all_stock(p)
-
-    if not scored:
-        print("⚠️ No valid scores, skipping save.")
-        return []    
-
-    if first_run or prev_best_score == 0:
-        save_top_picks(scored, top_n=TOP_N)
-        print("✅ Initial top picks saved (first run or reset)")
-    else:
-        new_best = scored[0] 
-        if new_best['score'] > prev_best_score + 0.05:
-            title = f"New top pick: {new_best['symbol']}"
-            body = f"Score {round(new_best['score']*100,2)} — Price {new_best['last_price']}"
-            log_notification("new_top", new_best['symbol'], title, body)
-            if FCM_TEST_TOKEN:
-                send_push(to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": new_best['symbol']})
-            save_top_picks(scored, top_n=TOP_N)
-            print("✅ Top picks updated & notified")
-        else:
-            print("✅ No new top beyond threshold; top picks unchanged")
-
-    return scored[:TOP_N]
-
-# ----------------------- SCHEDULER -----------------------
-scheduler = BackgroundScheduler()
-
-def start_scheduler():
-    # Prevent multiple schedulers on Render
-    if getattr(start_scheduler, "_started", False):
-        print("⚠️ Scheduler already started, skipping duplicate.")
-        return
-    start_scheduler._started = True
-
-    scheduler.add_job(find_top_picks_scheduler, 'interval', minutes=TOPPICKS_INTERVAL_MIN, next_run_time=dt.utcnow())
-    scheduler.add_job(monitor_positions_job, 'interval', minutes=MONITOR_INTERVAL_MIN, next_run_time=dt.utcnow())
-    scheduler.start()
-    print("✅ Scheduler started: monitoring + top picks active.")
-
-def shutdown_scheduler():
-    scheduler.shutdown(wait=True)
-    print("🛑 Scheduler stopped safely.")
-
-
-# Remove or comment out run_async_safe!
-# ----------------------- TOP PICKS SCHEDULER -----------------------
-
-# The functions below will now use `await` and run in the BackgroundTasks' loop.
-
-async def compute_top_picks(): # <--- CHANGE TO ASYNC DEF
+async def compute_top_picks(batch_size=BATCH_SIZE): # <-- New ASYNC function for main compute logic
     ensure_all_stocks_table()
     universe = load_universe()
     if not universe:
@@ -371,11 +302,9 @@ async def compute_top_picks(): # <--- CHANGE TO ASYNC DEF
     print(f"🔎 Computing top picks for {len(universe)} tickers...")
     features_list = []
 
-    # Run async-safe fetching (same logic as your scheduler)
     async def run_batches():
-        for i in range(0, len(universe), BATCH_SIZE):
-            batch = universe[i:i + BATCH_SIZE]
-            # tasks is fine because _fetch_and_compute is async
+        for i in range(0, len(universe), batch_size):
+            batch = universe[i:i + batch_size]
             tasks = [_fetch_and_compute(sym, interval="5m", period="1d") for sym in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
@@ -385,39 +314,82 @@ async def compute_top_picks(): # <--- CHANGE TO ASYNC DEF
                     features_list.append(r)
             await asyncio.sleep(BATCH_DELAY)
 
-    # ⚠️ CRITICAL CHANGE: AWAIT THE BATCH RUNNER
-    await run_batches() # <--- AWAIT THE ASYNC FUNCTION CALL
+    # AWAIT the async function call
+    await run_batches()
 
     if not features_list:
         print("⚠️ No features computed")
         return []
 
-    # Score the stocks
     scored = score_from_features(features_list)
     ts_val = dt.utcnow().isoformat()
     
-    # Use asyncio.to_thread for synchronous DB writing, if performance is an issue, 
-    # or keep it sync here since it's in a dedicated background task thread anyway.
-    # For simplicity, let's assume the upsert_all_stock calls are fast enough 
-    # since they are now in their own task.
+    # Run synchronous DB writing in a thread pool to avoid blocking
     for p in scored:
         p['ts'] = ts_val
+        # This function is fast enough, but for safety, we could also use await asyncio.to_thread(upsert_all_stock, p)
         upsert_all_stock(p)
 
     print("✅ Computed and stored latest stock data")
     return scored
 
-async def run_top_picks_once(): # <--- CHANGE TO ASYNC DEF
+async def run_top_picks_once(): # <-- New ASYNC function to manage a full pick cycle
     print("🔁 Running top picks once (startup/manual trigger)")
-    # ⚠️ CRITICAL CHANGE: AWAIT THE COMPUTE FUNCTION
-    scored = await compute_top_picks()
+    
+    scored = await compute_top_picks() # AWAIT the compute function
     if not scored:
         print("⚠️ No valid scores, skipping save.")
         return
-    
-    # Use asyncio.to_thread for synchronous save_top_picks, as it has I/O (Firebase)
-    await asyncio.to_thread(save_top_picks, scored, TOP_N)
-    print("✅ Top picks saved to Firebase")
+
+    # Check for new top pick before saving
+    current_tops = await asyncio.to_thread(get_current_top_scores, TOP_N)
+    first_run = len(current_tops) == 0
+    prev_best_score = current_tops[0][1] if current_tops else 0
+
+    if first_run or prev_best_score == 0:
+        await asyncio.to_thread(save_top_picks, scored, TOP_N)
+        print("✅ Initial top picks saved (first run or reset)")
+    else:
+        new_best = scored[0] 
+        if new_best['score'] > prev_best_score + 0.05:
+            title = f"New top pick: {new_best['symbol']}"
+            body = f"Score {round(new_best['score']*100,2)} — Price {new_best['last_price']}"
+            await asyncio.to_thread(log_notification, "new_top", new_best['symbol'], title, body)
+            if FCM_TEST_TOKEN:
+                await asyncio.to_thread(send_push, to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": new_best['symbol']})
+            await asyncio.to_thread(save_top_picks, scored, TOP_N)
+            print("✅ Top picks updated & notified")
+        else:
+            print("✅ No new top beyond threshold; top picks unchanged")
+
+# ----------------------- SCHEDULER -----------------------
+scheduler = BackgroundScheduler()
+
+# Wrapper function for APScheduler to call the async job
+def run_top_picks_async_wrapper():
+    """Runs the async job safely in a new event loop/thread for APScheduler."""
+    try:
+        # Use asyncio.run() to safely start the async coroutine from the sync thread
+        asyncio.run(run_top_picks_once())
+    except Exception as e:
+        print(f"❌ Error running scheduled top picks job: {e}")
+
+def start_scheduler():
+    # Prevent multiple schedulers on Render
+    if getattr(start_scheduler, "_started", False):
+        print("⚠️ Scheduler already started, skipping duplicate.")
+        return
+    start_scheduler._started = True
+
+    # Use the synchronous wrapper for the scheduled job
+    scheduler.add_job(run_top_picks_async_wrapper, 'interval', minutes=TOPPICKS_INTERVAL_MIN, next_run_time=dt.utcnow())
+    scheduler.add_job(monitor_positions_job, 'interval', minutes=MONITOR_INTERVAL_MIN, next_run_time=dt.utcnow())
+    scheduler.start()
+    print("✅ Scheduler started: monitoring + top picks active.")
+
+def shutdown_scheduler():
+    scheduler.shutdown(wait=True)
+    print("🛑 Scheduler stopped safely.")
 
 
 # ----------------------- STANDALONE RUN -----------------------
