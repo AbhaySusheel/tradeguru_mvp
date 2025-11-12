@@ -112,6 +112,8 @@ def sell_stock(payload: dict):
 
     return {"status": "ok", "message": "Position closed"}
 
+
+
 @router.get("/update-top-picks")
 async def update_top_picks(token: str, background_tasks: BackgroundTasks):
     """Trigger top picks update manually or via external cron."""
