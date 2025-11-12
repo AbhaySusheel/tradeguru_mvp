@@ -66,6 +66,6 @@ def root():
 async def run_startup_tasks():
     print("🚀 Running top stock finder once at startup...")
     try:
-        run_top_picks_once()
+        pass
     except Exception as e:
         print("⚠️ Error running top picks on startup:", e)
