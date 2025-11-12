@@ -193,7 +193,7 @@ def load_universe(csv_path=os.path.join("backend", "tickers.csv")):
             return []
         with open(csv_path) as f:
             universe = [line.strip() for line in f if line.strip()]
-        universe = universe[:500]
+        universe = universe[:50]
         print(f"✅ Using {len(universe)} symbols from local CSV fallback")
         return universe
 
@@ -382,7 +382,8 @@ def start_scheduler():
     start_scheduler._started = True
 
     # Use the synchronous wrapper for the scheduled job
-    scheduler.add_job(run_top_picks_async_wrapper, 'interval', minutes=TOPPICKS_INTERVAL_MIN, next_run_time=dt.utcnow())
+    #scheduler.add_job(run_top_picks_async_wrapper, 'interval', minutes=TOPPICKS_INTERVAL_MIN, next_run_time=dt.utcnow())
+    scheduler.add_job(run_top_picks_async_wrapper, 'interval', minutes=TOPPICKS_INTERVAL_MIN)
     scheduler.add_job(monitor_positions_job, 'interval', minutes=MONITOR_INTERVAL_MIN, next_run_time=dt.utcnow())
     scheduler.start()
     print("✅ Scheduler started: monitoring + top picks active.")
