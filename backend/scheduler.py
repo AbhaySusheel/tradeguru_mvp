@@ -273,28 +273,7 @@ def monitor_positions_job():
 
 # ... (around line 348)
 
-def run_async_safe(coro):
-    """Run any coroutine safely from APScheduler or main thread."""
-    # When this is called from a synchronous context (like APScheduler or 
-    # a BackgroundTasks thread), asyncio.run() creates a temporary loop 
-    # and runs the coroutine, preventing the thread from blocking indefinitely 
-    # while waiting on a different loop.
-    try:
-        # Use asyncio.run which is the standard way to run a top-level coroutine 
-        # from synchronous code, ensuring a new loop is created if needed.
-        return asyncio.run(coro)
-    except Exception as e:
-        print(f"❌ Error during asyncio.run in run_async_safe: {e}")
-        return None # or re-raise if you want the outer function to fail
 
-# You can delete the entire original `run_async_safe` function body, 
-# especially the part with `future.result()` which caused the block/timeout.
-# Original blocking logic:
-# if loop.is_running():
-#     future = asyncio.run_coroutine_threadsafe(coro, loop)
-#     return future.result() # ⚠️ THIS IS THE BLOCKING CODE!
-# else:
-#     return loop.run_until_complete(coro)
 
 def find_top_picks_scheduler(batch_size=BATCH_SIZE):
     ensure_all_stocks_table()
@@ -377,7 +356,12 @@ def shutdown_scheduler():
     print("🛑 Scheduler stopped safely.")
 
 
-def compute_top_picks():
+# Remove or comment out run_async_safe!
+# ----------------------- TOP PICKS SCHEDULER -----------------------
+
+# The functions below will now use `await` and run in the BackgroundTasks' loop.
+
+async def compute_top_picks(): # <--- CHANGE TO ASYNC DEF
     ensure_all_stocks_table()
     universe = load_universe()
     if not universe:
@@ -391,6 +375,7 @@ def compute_top_picks():
     async def run_batches():
         for i in range(0, len(universe), BATCH_SIZE):
             batch = universe[i:i + BATCH_SIZE]
+            # tasks is fine because _fetch_and_compute is async
             tasks = [_fetch_and_compute(sym, interval="5m", period="1d") for sym in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
@@ -400,7 +385,8 @@ def compute_top_picks():
                     features_list.append(r)
             await asyncio.sleep(BATCH_DELAY)
 
-    run_async_safe(run_batches())
+    # ⚠️ CRITICAL CHANGE: AWAIT THE BATCH RUNNER
+    await run_batches() # <--- AWAIT THE ASYNC FUNCTION CALL
 
     if not features_list:
         print("⚠️ No features computed")
@@ -409,6 +395,11 @@ def compute_top_picks():
     # Score the stocks
     scored = score_from_features(features_list)
     ts_val = dt.utcnow().isoformat()
+    
+    # Use asyncio.to_thread for synchronous DB writing, if performance is an issue, 
+    # or keep it sync here since it's in a dedicated background task thread anyway.
+    # For simplicity, let's assume the upsert_all_stock calls are fast enough 
+    # since they are now in their own task.
     for p in scored:
         p['ts'] = ts_val
         upsert_all_stock(p)
@@ -416,13 +407,16 @@ def compute_top_picks():
     print("✅ Computed and stored latest stock data")
     return scored
 
-def run_top_picks_once():
-    print("🔁 Running top picks once (startup)")
-    scored = compute_top_picks()
+async def run_top_picks_once(): # <--- CHANGE TO ASYNC DEF
+    print("🔁 Running top picks once (startup/manual trigger)")
+    # ⚠️ CRITICAL CHANGE: AWAIT THE COMPUTE FUNCTION
+    scored = await compute_top_picks()
     if not scored:
         print("⚠️ No valid scores, skipping save.")
         return
-    save_top_picks(scored, top_n=TOP_N)
+    
+    # Use asyncio.to_thread for synchronous save_top_picks, as it has I/O (Firebase)
+    await asyncio.to_thread(save_top_picks, scored, TOP_N)
     print("✅ Top picks saved to Firebase")
 
 
