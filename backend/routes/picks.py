@@ -22,7 +22,11 @@ FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 
 def _get_top_picks_data_sync(limit: int):
     """Synchronously fetches data from Firestore. This function will be run in a separate thread."""
-    db_firestore = firestore.client()
+    
+    # CRITICAL FIX: Get the already initialized client globally. 
+    # This prevents the thread from hanging on repeated client initialization.
+    db_firestore = firestore.client() 
+    
     doc_ref = db_firestore.collection("top_picks").document("latest")
     
     # Still use a timeout. If the connection fails, this will throw DeadlineExceeded.
