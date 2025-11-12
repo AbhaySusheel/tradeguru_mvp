@@ -112,16 +112,20 @@ def sell_stock(payload: dict):
 
     return {"status": "ok", "message": "Position closed"}
 
-
 @router.get("/update-top-picks")
-def update_top_picks(token: str):
+async def update_top_picks(token: str, background_tasks: BackgroundTasks):
     """Trigger top picks update manually or via external cron."""
     if token != CRON_SECRET:
-        return {"status": "error", "message": "Unauthorized"}
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
-        run_top_picks_once()
-        return {"status": "ok", "message": "Top picks updated successfully"}
+        # ✅ Add the long-running function to the background
+        # Note: We must use the synchronous version of the function here
+        background_tasks.add_task(run_top_picks_once) 
+        
+        # ✅ Return the successful response IMMEDIATELY
+        return {"status": "ok", "message": "Top picks update STARTED successfully"}
     except Exception as e:
-        print("⚠️ Error in manual update:", e)
-        return {"status": "error", "message": str(e)}    
+        print("⚠️ Error starting manual update task:", e)
+        # This error is from adding the task, not the task itself
+        return {"status": "error", "message": "Failed to start update task: " + str(e)}
