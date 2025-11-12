@@ -22,10 +22,10 @@ async def lifespan(app: FastAPI):
     print("🗄 Initializing database...")
     init_db()
 
-    #start_scheduler()
+    start_scheduler()
     print("🚀 Running top stock finder once at startup...")
     try:
-        pass    
+        await run_top_picks_once()   
     #   find_top_picks_scheduler()
     except Exception as e:
         print("Startup top picks run failed:", e)
