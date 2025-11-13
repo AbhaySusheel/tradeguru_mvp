@@ -1,15 +1,15 @@
-# backend/routes/picks.py
 import os
 import sqlite3
 import asyncio
+import httpx 
 from datetime import datetime as dt
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from scheduler import db_conn
 from utils.notifier import send_push
 from scheduler import run_top_picks_once
 from firebase_admin import firestore
+# Import specific Firestore types and errors for robust handling
 from google.cloud.firestore_v1.base_document import DocumentSnapshot
-# Import specific error for better handling
 from google.api_core.exceptions import DeadlineExceeded 
 
 CRON_SECRET = os.getenv("CRON_SECRET", "my_secret_token")
@@ -18,18 +18,23 @@ router = APIRouter()
 EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN", "")
 FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 
+# -------------------- GLOBAL FIREBASE CLIENT INITIALIZATION --------------------
+# FIX: Initialize the Firestore client once globally. This client is thread-safe 
+# and prevents the hang caused by repeated synchronous initialization attempts 
+# inside the worker threads.
+DB_FIRESTORE = firestore.client()
+
 # -------------------- HELPER FOR BLOCKING FIREBASE CALL --------------------
 
 def _get_top_picks_data_sync(limit: int):
-    """Synchronously fetches data from Firestore. This function will be run in a separate thread."""
+    """Synchronously fetches data from Firestore using the global client in a separate thread."""
     
-    # CRITICAL FIX: Get the already initialized client globally. 
-    # This prevents the thread from hanging on repeated client initialization.
-    db_firestore = firestore.client() 
+    # Use the already initialized global client instance.
+    db_firestore = DB_FIRESTORE 
     
     doc_ref = db_firestore.collection("top_picks").document("latest")
     
-    # Still use a timeout. If the connection fails, this will throw DeadlineExceeded.
+    # Still use a timeout to prevent hanging in case of a network block.
     doc: DocumentSnapshot = doc_ref.get(timeout=5) 
 
     if not doc.exists:
@@ -42,16 +47,16 @@ def _get_top_picks_data_sync(limit: int):
 
 @router.get("/top-picks")
 async def top_picks(limit: int = 10):
-    """Return latest top picks from Firebase Firestore using async thread."""
+    """Return latest top picks from Firebase Firestore, running the synchronous read in a background thread."""
     try:
         # Use asyncio.to_thread to run the blocking synchronous function 
-        # in a separate thread, protecting the main event loop from hanging.
+        # in a separate thread, protecting the main event loop.
         result = await asyncio.to_thread(_get_top_picks_data_sync, limit)
         return result
 
     except DeadlineExceeded as e:
         print(f"⚠️ Firestore read timeout (DeadlineExceeded): {e}")
-        # 504 Gateway Timeout is the most appropriate status for an external API timeout.
+        # Return 504 if the external API (Firestore) times out
         raise HTTPException(
             status_code=504, 
             detail="Failed to fetch data: External API timeout (Firestore)."
@@ -100,9 +105,9 @@ def buy_stock(payload: dict):
     # title = f"Bought {symbol}"
     # body = f"Opened @ ₹{price:.2f} | Target {target}% Stop {stop}%"
     # if FCM_TEST_TOKEN:
-    #     send_push(FCM_TEST_TOKEN, title, body)
+    # 	 send_push(FCM_TEST_TOKEN, title, body)
     # if EXPO_PUSH_TOKEN:
-    #     send_push(EXPO_PUSH_TOKEN, title, body)
+    # 	 send_push(EXPO_PUSH_TOKEN, title, body)
     
     return {"status": "ok", "message": "Position opened"}
 
@@ -129,20 +134,19 @@ def sell_stock(payload: dict):
     # Notification logic (assuming send_push is defined elsewhere)
     # pl_text = ""
     # if entry_price:
-    #     pl_pct = (price - entry_price) / entry_price * 100
-    #     pl_text = f" Realized P/L: {pl_pct:.2f}%"
+    # 	 pl_pct = (price - entry_price) / entry_price * 100
+    # 	 pl_text = f" Realized P/L: {pl_pct:.2f}%"
     # 
     # title = f"Sold {symbol}"
     # body = f"Closed @ ₹{price:.2f}.{pl_text}"
     # if FCM_TEST_TOKEN:
-    #     send_push(FCM_TEST_TOKEN, title, body)
+    # 	 send_push(FCM_TEST_TOKEN, title, body)
     # if EXPO_PUSH_TOKEN:
-    #     send_push(EXPO_PUSH_TOKEN, title, body)
+    # 	 send_push(EXPO_PUSH_TOKEN, title, body)
 
     return {"status": "ok", "message": "Position closed"}
 
 
-# Added missing CRON_SECRET check for the update endpoint based on context
 @router.get("/update-top-picks")
 async def update_top_picks(token: str, background_tasks: BackgroundTasks):
     if token != CRON_SECRET:
