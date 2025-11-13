@@ -11,6 +11,8 @@ from firebase_admin import firestore
 # Import specific Firestore types and errors for robust handling
 from google.cloud.firestore_v1.base_document import DocumentSnapshot
 from google.api_core.exceptions import DeadlineExceeded 
+# Import the base Google Auth exceptions just in case
+from google.auth.exceptions import DefaultCredentialsError
 
 CRON_SECRET = os.getenv("CRON_SECRET", "my_secret_token")
 router = APIRouter()
@@ -19,29 +21,45 @@ EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN", "")
 FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 
 # -------------------- GLOBAL FIREBASE CLIENT INITIALIZATION --------------------
-# FIX: Initialize the Firestore client once globally. This client is thread-safe 
-# and prevents the hang caused by repeated synchronous initialization attempts 
-# inside the worker threads.
+# FIX: Initialize the Firestore client once globally. This is the optimal approach.
 DB_FIRESTORE = firestore.client()
 
 # -------------------- HELPER FOR BLOCKING FIREBASE CALL --------------------
 
 def _get_top_picks_data_sync(limit: int):
-    """Synchronously fetches data from Firestore using the global client in a separate thread."""
-    
-    # Use the already initialized global client instance.
-    db_firestore = DB_FIRESTORE 
-    
-    doc_ref = db_firestore.collection("top_picks").document("latest")
-    
-    # Still use a timeout to prevent hanging in case of a network block.
-    doc: DocumentSnapshot = doc_ref.get(timeout=5) 
+    """
+    Synchronously fetches data from Firestore using the global client in a separate thread.
+    Added verbose error handling for debugging connection issues.
+    """
+    try:
+        db_firestore = DB_FIRESTORE 
+        doc_ref = db_firestore.collection("top_picks").document("latest")
+        
+        # Blocking synchronous network call with a timeout
+        doc: DocumentSnapshot = doc_ref.get(timeout=5) 
 
-    if not doc.exists:
-        return {"top_picks": [], "message": "No data available yet."}
+        if not doc.exists:
+            return {"top_picks": [], "message": "No data available yet."}
 
-    data = doc.to_dict().get("data", [])
-    return {"top_picks": data[:limit]}
+        data = doc.to_dict().get("data", [])
+        return {"top_picks": data[:limit]}
+    
+    except DeadlineExceeded as e:
+        # Expected timeout error
+        print(f"DEBUG: DeadlineExceeded occurred inside sync function. The read request timed out: {e}")
+        raise e
+    
+    except DefaultCredentialsError as e:
+        # Critical error if credentials are not found/configured
+        print(f"CRITICAL: GOOGLE AUTH ERROR: Default credentials could not be found or are invalid. Check GOOGLE_APPLICATION_CREDENTIALS / Service Account setup. Error: {e}")
+        # Re-raise as an HTTPException precursor
+        raise RuntimeError(f"Authentication Error: {e}")
+        
+    except Exception as e:
+        # Catch any other connection, environment, or unexpected error
+        print(f"CRITICAL: Unhandled error in Firestore sync function: {type(e).__name__}: {e}")
+        # Re-raise to be caught by the async wrapper for the 503 HTTP response
+        raise RuntimeError(f"Internal Firestore Error ({type(e).__name__}): {e}")
 
 # ------------------------- ASYNC ROUTE -------------------------
 
@@ -49,17 +67,22 @@ def _get_top_picks_data_sync(limit: int):
 async def top_picks(limit: int = 10):
     """Return latest top picks from Firebase Firestore, running the synchronous read in a background thread."""
     try:
-        # Use asyncio.to_thread to run the blocking synchronous function 
-        # in a separate thread, protecting the main event loop.
+        # Run the potentially blocking function in a separate thread
         result = await asyncio.to_thread(_get_top_picks_data_sync, limit)
         return result
 
     except DeadlineExceeded as e:
         print(f"⚠️ Firestore read timeout (DeadlineExceeded): {e}")
-        # Return 504 if the external API (Firestore) times out
         raise HTTPException(
             status_code=504, 
             detail="Failed to fetch data: External API timeout (Firestore)."
+        )
+    except RuntimeError as e:
+        # Catch errors explicitly raised from the sync function (Auth, Unhandled)
+        print(f"⚠️ Runtime Error from Firestore sync function: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal Server Error during Firestore fetch. Check credentials/network. Error: {e}"
         )
     except Exception as e:
         print(f"⚠️ Unexpected error fetching top picks: {e}")
