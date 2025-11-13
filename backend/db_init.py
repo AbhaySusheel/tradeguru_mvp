@@ -1,23 +1,31 @@
-# backend/db_init.py
 import os
 import json
 import sqlite3
+import firebase_admin
 from firebase_admin import credentials, firestore, initialize_app
 
 # -----------------------------
 # ✅ FIRESTORE GLOBAL INITIALIZATION
 # -----------------------------
 # Initialize Firestore client globally (only once)
-if not initialize_app._apps:
+if not firebase_admin._apps:
     cred_json = os.getenv("FIREBASE_KEY_JSON")
     if cred_json:
         cred = credentials.Certificate(json.loads(cred_json))
+        print("✅ Firebase initialized from FIREBASE_KEY_JSON environment variable")
     else:
+        print("⚠️ FIREBASE_KEY_JSON not found, using Application Default Credentials")
         cred = credentials.ApplicationDefault()
     initialize_app(cred)
+else:
+    print("✅ Firebase already initialized")
 
 db_firestore = firestore.client()
 
+
+# -----------------------------
+# ✅ SQLITE DATABASE INITIALIZATION
+# -----------------------------
 def init_db():
     conn = sqlite3.connect("app.db")
     c = conn.cursor()
@@ -86,6 +94,7 @@ def init_db():
     conn.commit()
     conn.close()
     print("✅ Database initialized successfully.")
+
 
 if __name__ == "__main__":
     init_db()
