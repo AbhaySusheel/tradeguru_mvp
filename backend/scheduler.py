@@ -365,7 +365,8 @@ async def run_top_picks_once(): # <-- New ASYNC function to manage a full pick c
             await asyncio.to_thread(save_top_picks, scored, TOP_N)
             print("✅ Top picks updated & notified")
         else:
-            print("✅ No new top beyond threshold; top picks unchanged")
+            print("✅ No new top beyond threshold; top picks unchanged — forcing Firestore save for verification.")
+            await asyncio.to_thread(save_top_picks, scored, TOP_N)
 
 # ----------------------- SCHEDULER -----------------------
 scheduler = BackgroundScheduler()
