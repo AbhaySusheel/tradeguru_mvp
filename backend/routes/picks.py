@@ -24,6 +24,23 @@ FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 # FIX: Initialize the Firestore client once globally. This is the optimal approach.
 DB_FIRESTORE = firestore.client()
 
+
+
+import math
+
+def clean_for_json(obj):
+    """Recursively replace NaN/inf values with 0 for safe JSON serialization."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return 0.0
+        return obj
+    elif isinstance(obj, list):
+        return [clean_for_json(i) for i in obj]
+    elif isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items()}
+    return obj
+
+
 # -------------------- HELPER FOR BLOCKING FIREBASE CALL --------------------
 
 def _get_top_picks_data_sync(limit: int):
@@ -69,7 +86,8 @@ async def top_picks(limit: int = 10):
     try:
         # Run the potentially blocking function in a separate thread
         result = await asyncio.to_thread(_get_top_picks_data_sync, limit)
-        return result
+        cleaned = clean_for_json(result)
+        return cleaned
 
     except DeadlineExceeded as e:
         print(f"⚠️ Firestore read timeout (DeadlineExceeded): {e}")
