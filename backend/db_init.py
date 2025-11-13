@@ -9,7 +9,8 @@ from firebase_admin import credentials, firestore, initialize_app
 # -----------------------------
 # Initialize Firestore client globally (only once)
 if not firebase_admin._apps:
-    cred_json = os.getenv("FIREBASE_KEY_JSON")
+    cred_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
+
     if cred_json:
         cred = credentials.Certificate(json.loads(cred_json))
         print("✅ Firebase initialized from FIREBASE_KEY_JSON environment variable")

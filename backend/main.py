@@ -22,7 +22,9 @@ async def lifespan(app: FastAPI):
 
     print("🚀 Running top stock finder once at startup...")
     try:
-        run_top_picks_once()   # or await run_top_picks_once() if async
+
+        await run_top_picks_once()
+
     except Exception as e:
         print("⚠️ Startup top picks run failed:", e)
 
