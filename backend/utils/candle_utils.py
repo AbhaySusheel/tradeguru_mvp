@@ -95,14 +95,18 @@ def compute_candle_score(df):
     Computes:
         - pattern flags (1/0)
         - candle pattern strength score (0–100)
+        - candle_bull / candle_bear (needed by compute_features)
     """
     if df is None or len(df) < 3:
         return {
             "candle_pattern_score": 0,
-            "pattern_flags": {}
+            "pattern_flags": {
+                "candle_bull": 0,
+                "candle_bear": 0
+            }
         }
 
-    # Use last 3 candles for multi-candle patterns
+    # Use last 3 candles
     o3, h3, l3, c3 = df.iloc[-1][["Open", "High", "Low", "Close"]]
     o2, h2, l2, c2 = df.iloc[-2][["Open", "High", "Low", "Close"]]
     o1, h1, l1, c1 = df.iloc[-3][["Open", "High", "Low", "Close"]]
@@ -124,11 +128,9 @@ def compute_candle_score(df):
     flags["evening_star"] = detect_evening_star(o1, c1, o2, c2, o3, c3)
 
     # --------------------------------------------------------
-    # Pattern Strength Calculation (ML-Grade)
+    # Pattern Strength Calculation
     # --------------------------------------------------------
     score = 0
-
-    # Weighting based on reliability in literature
     weights = {
         "hammer": 12,
         "shooting_star": 12,
@@ -146,10 +148,31 @@ def compute_candle_score(df):
 
     score = min(100, score)  # cap
 
+    # --------------------------------------------------------
+    # REQUIRED FIX: always include these keys
+    # --------------------------------------------------------
+    # Bullish candle if bullish_engulfing or morning_star or hammer etc.
+    bull = 1 if (
+        flags.get("bullish_engulfing") or
+        flags.get("morning_star") or
+        flags.get("hammer")
+    ) else 0
+
+    # Bearish candle if bearish_engulfing or evening_star or shooting_star
+    bear = 1 if (
+        flags.get("bearish_engulfing") or
+        flags.get("evening_star") or
+        flags.get("shooting_star")
+    ) else 0
+
+    flags.setdefault("candle_bull", bull)
+    flags.setdefault("candle_bear", bear)
+
     return {
         "candle_pattern_score": score,
         "pattern_flags": flags
     }
+
 # ------------------------------------------------------------
 # Public API Wrapper (Required by market.py)
 # ------------------------------------------------------------
