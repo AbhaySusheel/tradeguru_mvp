@@ -3,9 +3,15 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from utils.volume_utils import compute_volume_features, compute_volume_signal
-from utils.swing_utils import compute_trend_structure
-from utils.candle_utils import get_candle_features
+from .volume_utils import compute_volume_features, compute_volume_signal
+from .swing_utils import compute_trend_structure
+from .candle_utils import get_candle_features
+from .atr_utils import compute_volatility_regime
+from .risk_utils import compute_total_risk
+from .buy_confidence_utils import compute_buy_confidence
+
+
+
 
 
 # -----------------------
@@ -281,6 +287,12 @@ def compute_features(df):
     # === Volatility (std of returns) ===
     volatility = float(close.pct_change().rolling(10).std().iloc[-1] or 0)
 
+    # === ATR + Volatility Regime ===
+    atr_data = compute_volatility_regime(df)
+    atr_value = atr_data["atr"]
+    atr_pct = atr_data["atr_pct"]
+    vol_regime = atr_data["vol_regime"]
+
     # === Advanced S/R ===
     sup_zones, res_zones = compute_sr_zones(df)
 
@@ -302,6 +314,16 @@ def compute_features(df):
     # === CANDLE PATTERN FEATURES (ML-friendly numeric)
     # ============================================================
     candle = get_candle_features(df)
+
+    # === Buy Confidence Score ===
+    buy_confidence = compute_buy_confidence({
+    "candle_bull": candle["candle_bull"],
+    "vol_signal": vol_signal,
+    "trend_phase": trend_phase,
+    "rsi": rsi,
+    "breakout_score": breakout_score
+    })
+
 
     # ============================================================
     # RETURN FEATURE DICT
@@ -332,6 +354,11 @@ def compute_features(df):
         "macd_trend": macd_trend,
         "volatility": volatility,
 
+        # === ATR + Volatility Regime ===
+        "atr": atr_value,
+        "atr_pct": atr_pct,
+        "vol_regime": vol_regime,
+
         # === Support / Resistance ===
         "sr_support_zones": sup_zones,
         "sr_resistance_zones": res_zones,
@@ -350,6 +377,17 @@ def compute_features(df):
         "hammer": candle["hammer"],
         "doji": candle["doji"],
         "engulfing": candle["engulfing"],
+        
+        # === Risk Score ===
+        "risk_score": compute_total_risk({
+        "atr_percent": atr_pct,
+        "volume_score": vol_signal,
+        "candle_strength": candle["candle_bull"],
+        "trend_tag": trend_phase
+        }),
+
+        "buy_confidence": buy_confidence,
+
 
         "last_price": float(round(last_price, 2))
     }
