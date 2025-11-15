@@ -178,9 +178,27 @@ def compute_candle_score(df):
 # ------------------------------------------------------------
 def get_candle_features(df):
     """
-    Wrapper so market.py can import a clean interface.
-    Returns:
-        - candle_pattern_score (0–100)
-        - pattern_flags (dict of 1/0 signals)
+    Returns a FLAT dict required by market.py:
+        - candle_bull
+        - candle_bear
+        - hammer
+        - doji
+        - engulfing (bullish or bearish)
     """
-    return compute_candle_score(df)
+    result = compute_candle_score(df)
+    flags = result["pattern_flags"]
+
+    # Combine engulfing into single binary field
+    engulf = 1 if (flags.get("bullish_engulfing") or flags.get("bearish_engulfing")) else 0
+
+    return {
+        "candle_pattern_score": result["candle_pattern_score"],
+        "candle_bull": flags.get("candle_bull", 0),
+        "candle_bear": flags.get("candle_bear", 0),
+
+        # individual candle patterns
+        "hammer": flags.get("hammer", 0),
+        "doji": flags.get("doji", 0),
+        "engulfing": engulf
+    }
+
