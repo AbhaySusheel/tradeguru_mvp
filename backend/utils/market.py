@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from utils.volume_utils import compute_volume_features, compute_volume_signal
+from utils.swing_utils import compute_trend_structure
+from utils.candle_utils import get_candle_features
 
 
 # -----------------------
@@ -247,7 +249,7 @@ def compute_features(df):
     # === Intraday Change ===
     intraday_pct = (close.iloc[-1] - df["Open"].iloc[0]) / df["Open"].iloc[0] * 100
 
-    # === 5m short & long (same as before) ===
+    # === 5m short & long ===
     ma_short = close.rolling(3).mean().iloc[-1] if len(close) >= 3 else float(close.iloc[-1])
     ma_long  = close.rolling(12).mean().iloc[-1] if len(close) >= 12 else float(close.iloc[-1])
 
@@ -257,7 +259,6 @@ def compute_features(df):
     vol_features = compute_volume_features(vol)
     vol_signal = compute_volume_signal(vol_features)
 
-    # Extract for convenience (still keep your old fields for compatibility)
     vol_mean_20  = vol_features["vol_mean_20"]
     vol_std_20   = vol_features["vol_std_20"]
     vol_zscore   = vol_features["vol_zscore"]
@@ -277,10 +278,10 @@ def compute_features(df):
     macd, macd_signal, macd_hist = compute_macd(close)
     macd_trend = 1 if macd > macd_signal else 0
 
-    # === Volatility (standard deviation of returns) ===
+    # === Volatility (std of returns) ===
     volatility = float(close.pct_change().rolling(10).std().iloc[-1] or 0)
 
-    # === Advanced S/R (uses last SR_LOOKBACK candles) ===
+    # === Advanced S/R ===
     sup_zones, res_zones = compute_sr_zones(df)
 
     last_price = float(close.iloc[-1])
@@ -289,7 +290,21 @@ def compute_features(df):
     )
 
     # ============================================================
-    # RETURN FINAL FEATURE DICT
+    # === TREND STRUCTURE (Swing HH/HL/LH/LL + Market Phase)
+    # ============================================================
+    swing = compute_trend_structure(df)
+
+    trend_events = swing["trend_events"]
+    trend_phase = swing["trend_phase"]
+    swing_score = swing["swing_score"]
+
+    # ============================================================
+    # === CANDLE PATTERN FEATURES (ML-friendly numeric)
+    # ============================================================
+    candle = get_candle_features(df)
+
+    # ============================================================
+    # RETURN FEATURE DICT
     # ============================================================
     return {
         "intraday_pct": float(round(intraday_pct, 4)),
@@ -297,17 +312,17 @@ def compute_features(df):
         "ma_long": float(ma_long),
         "ma_diff": float(ma_short - ma_long),
 
-        # === Old + New Volume Features ===
+        # === Volume Features ===
         "vol_ratio": float(round(vol_ratio, 4)),
         "vol_strength": float(round(vol_strength, 4)),
         "vol_20_mean": vol_mean_20,
         "vol_20_std": vol_std_20,
         "vol_zscore": vol_zscore,
-        "vol_surge": vol_surge,               # 1 = abnormal volume
-        "vol_trend_5": vol_trend_5,           # short-term volume trend
-        "vol_trend_20": vol_trend_20,         # long-term volume trend
-        "vol_spike_ratio": vol_spike_ratio,   # 1 = highest in 20 bars
-        "vol_signal": vol_signal,             # final ML volume signal (0–1)
+        "vol_surge": vol_surge,
+        "vol_trend_5": vol_trend_5,
+        "vol_trend_20": vol_trend_20,
+        "vol_spike_ratio": vol_spike_ratio,
+        "vol_signal": vol_signal,
 
         # === Momentum Indicators ===
         "rsi": float(round(rsi, 2)),
@@ -317,12 +332,24 @@ def compute_features(df):
         "macd_trend": macd_trend,
         "volatility": volatility,
 
-        # === S/R ===
+        # === Support / Resistance ===
         "sr_support_zones": sup_zones,
         "sr_resistance_zones": res_zones,
         "breakout_score": breakout_score,
         "bounce_score": bounce_score,
         "sr_score": sr_score,
+
+        # === Trend Structure ===
+        "trend_events": trend_events,
+        "trend_phase": trend_phase,
+        "swing_score": swing_score,
+
+        # === Candle Patterns ===
+        "candle_bull": candle["candle_bull"],
+        "candle_bear": candle["candle_bear"],
+        "hammer": candle["hammer"],
+        "doji": candle["doji"],
+        "engulfing": candle["engulfing"],
 
         "last_price": float(round(last_price, 2))
     }
