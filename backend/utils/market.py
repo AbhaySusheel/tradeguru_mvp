@@ -17,37 +17,69 @@ def fetch_intraday(symbol, period="1d", interval="5m"):
         print("fetch_intraday error", symbol, e)
         return None
 
+
+def compute_rsi(close, period=14):
+    delta = close.diff().dropna()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+
+    ma_up = up.rolling(period).mean()
+    ma_down = down.rolling(period).mean()
+
+    rs = ma_up / (ma_down + 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1] if not rsi.empty else 50
+
+
+def compute_macd(close):
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    signal = macd_line.ewm(span=9, adjust=False).mean()
+    hist = macd_line - signal
+    return float(macd_line.iloc[-1]), float(signal.iloc[-1]), float(hist.iloc[-1])
+
+
 def compute_features(df):
     """Given DataFrame with Open, High, Low, Close, Volume, compute features."""
     if df is None or df.empty:
         return None
-    close = df['Close']
-    vol = df['Volume']
 
-    # intraday pct: last close vs first open
-    intraday_pct = (close.iloc[-1] - df['Open'].iloc[0]) / df['Open'].iloc[0] * 100
+    close = df["Close"]
+    vol = df["Volume"]
 
-    # MA short & long (on close)
-    ma_short = close.rolling(3).mean().iloc[-1]   # e.g., 15m if interval=5m
-    ma_long  = close.rolling(12).mean().iloc[-1]  # e.g., 60m
+    # === Intraday Change ===
+    intraday_pct = (close.iloc[-1] - df["Open"].iloc[0]) / df["Open"].iloc[0] * 100
 
-    # volume ratio: last bar volume vs average
+    # === 5m short & long (same as before) ===
+    ma_short = close.rolling(3).mean().iloc[-1]
+    ma_long  = close.rolling(12).mean().iloc[-1]
+
+    # === Volume Strength ===
     avg_vol = vol.mean() if vol.mean() > 0 else 1
     vol_ratio = vol.iloc[-1] / avg_vol
 
-    # RSI (simple)
-    delta = close.diff().dropna()
-    up = delta.clip(lower=0).rolling(14).mean()
-    down = -delta.clip(upper=0).rolling(14).mean()
-    rsi = 100 - (100 / (1 + (up / (down + 1e-9))))
-    rsi = rsi.iloc[-1] if not rsi.empty else 50
+    # === RSI ===
+    rsi = compute_rsi(close)
+
+    # === MACD ===
+    macd, macd_signal, macd_hist = compute_macd(close)
+    macd_trend = 1 if macd > macd_signal else 0
+
+    # === Volatility (standard deviation of returns) ===
+    volatility = float(close.pct_change().rolling(10).std().iloc[-1] or 0)
 
     return {
         "intraday_pct": float(round(intraday_pct, 4)),
-        "ma_short": float(round(ma_short, 4)),
-        "ma_long": float(round(ma_long, 4)),
-        "ma_diff": float(round(ma_short - ma_long, 4)),
+        "ma_short": float(ma_short),
+        "ma_long": float(ma_long),
+        "ma_diff": float(ma_short - ma_long),
         "vol_ratio": float(round(vol_ratio, 4)),
         "rsi": float(round(rsi, 2)),
+        "macd": macd,
+        "macd_signal": macd_signal,
+        "macd_hist": macd_hist,
+        "macd_trend": macd_trend,
+        "volatility": volatility,
         "last_price": float(round(close.iloc[-1], 2))
     }
