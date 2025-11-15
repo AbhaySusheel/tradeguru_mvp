@@ -269,13 +269,14 @@ def compute_features(df):
 
     # === Advanced S/R (uses last SR_LOOKBACK candles) ===
     sup_zones, res_zones = compute_sr_zones(df)
-    if df.name == "TATAMOTORS":     # <--- IMPORTANT: df.name holds the symbol
-    print("========== DEBUG S/R ZONES ==========")
-    print(f"Symbol: {df.name}")
-    print(f"Last Price: {df['Close'].iloc[-1]}")
-    print(f"Support Zones: {sup_zones}")
-    print(f"Resistance Zones: {res_zones}")
-    print("=====================================")
+    if df.name == "TATAMOTORS": 
+            # <--- IMPORTANT: df.name holds the symbol
+        print("========== DEBUG S/R ZONES ==========")
+        print(f"Symbol: {df.name}")
+        print(f"Last Price: {df['Close'].iloc[-1]}")
+        print(f"Support Zones: {sup_zones}")
+        print(f"Resistance Zones: {res_zones}")
+        print("=====================================")
     last_price = float(close.iloc[-1])
     breakout_score, bounce_score, sr_score = compute_breakout_bounce_scores(
         last_price, sup_zones, res_zones, close.tail(10), rsi
