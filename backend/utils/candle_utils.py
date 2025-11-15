@@ -150,3 +150,14 @@ def compute_candle_score(df):
         "candle_pattern_score": score,
         "pattern_flags": flags
     }
+# ------------------------------------------------------------
+# Public API Wrapper (Required by market.py)
+# ------------------------------------------------------------
+def get_candle_features(df):
+    """
+    Wrapper so market.py can import a clean interface.
+    Returns:
+        - candle_pattern_score (0–100)
+        - pattern_flags (dict of 1/0 signals)
+    """
+    return compute_candle_score(df)
