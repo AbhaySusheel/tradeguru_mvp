@@ -3,6 +3,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from utils.volume_utils import compute_volume_features, compute_volume_signal
+
 
 # -----------------------
 # Config
@@ -249,13 +251,24 @@ def compute_features(df):
     ma_short = close.rolling(3).mean().iloc[-1] if len(close) >= 3 else float(close.iloc[-1])
     ma_long  = close.rolling(12).mean().iloc[-1] if len(close) >= 12 else float(close.iloc[-1])
 
-    # === Volume Strength using last 20 bars (or fewer if not available) ===
-    vol_20 = vol.tail(20)
-    vol_20_mean = float(vol_20.mean()) if len(vol_20) > 0 else float(vol.mean() or 1)
-    vol_20_std  = float(vol_20.std()) if len(vol_20) > 1 else 0.0
+    # ============================================================
+    # === ADVANCED VOLUME MODEL (Option B – ML Optimized)
+    # ============================================================
+    vol_features = compute_volume_features(vol)
+    vol_signal = compute_volume_signal(vol_features)
+
+    # Extract for convenience (still keep your old fields for compatibility)
+    vol_mean_20  = vol_features["vol_mean_20"]
+    vol_std_20   = vol_features["vol_std_20"]
+    vol_zscore   = vol_features["vol_zscore"]
+    vol_surge    = vol_features["vol_surge"]
+    vol_trend_5  = vol_features["vol_trend_5"]
+    vol_trend_20 = vol_features["vol_trend_20"]
+    vol_spike_ratio = vol_features["vol_spike_ratio"]
+
     vol_now = float(vol.iloc[-1])
-    vol_strength = vol_now / (vol_20_mean + 1e-9)
-    vol_zscore = (vol_now - vol_20_mean) / (vol_20_std + 1e-9) if vol_20_std > 0 else 0.0
+    vol_ratio = vol_now / (vol.mean() + 1e-9)
+    vol_strength = vol_now / (vol_mean_20 + 1e-9)
 
     # === RSI ===
     rsi = compute_rsi(close)
@@ -269,32 +282,47 @@ def compute_features(df):
 
     # === Advanced S/R (uses last SR_LOOKBACK candles) ===
     sup_zones, res_zones = compute_sr_zones(df)
-    
+
     last_price = float(close.iloc[-1])
     breakout_score, bounce_score, sr_score = compute_breakout_bounce_scores(
         last_price, sup_zones, res_zones, close.tail(10), rsi
     )
 
+    # ============================================================
+    # RETURN FINAL FEATURE DICT
+    # ============================================================
     return {
         "intraday_pct": float(round(intraday_pct, 4)),
         "ma_short": float(ma_short),
         "ma_long": float(ma_long),
         "ma_diff": float(ma_short - ma_long),
-        "vol_ratio": float(round(vol_now / (vol.mean() + 1e-9), 4)),
-        "vol_20_mean": vol_20_mean,
-        "vol_20_std": vol_20_std,
+
+        # === Old + New Volume Features ===
+        "vol_ratio": float(round(vol_ratio, 4)),
         "vol_strength": float(round(vol_strength, 4)),
-        "vol_zscore": float(round(vol_zscore, 4)),
+        "vol_20_mean": vol_mean_20,
+        "vol_20_std": vol_std_20,
+        "vol_zscore": vol_zscore,
+        "vol_surge": vol_surge,               # 1 = abnormal volume
+        "vol_trend_5": vol_trend_5,           # short-term volume trend
+        "vol_trend_20": vol_trend_20,         # long-term volume trend
+        "vol_spike_ratio": vol_spike_ratio,   # 1 = highest in 20 bars
+        "vol_signal": vol_signal,             # final ML volume signal (0–1)
+
+        # === Momentum Indicators ===
         "rsi": float(round(rsi, 2)),
         "macd": macd,
         "macd_signal": macd_signal,
         "macd_hist": macd_hist,
         "macd_trend": macd_trend,
         "volatility": volatility,
+
+        # === S/R ===
         "sr_support_zones": sup_zones,
         "sr_resistance_zones": res_zones,
         "breakout_score": breakout_score,
         "bounce_score": bounce_score,
         "sr_score": sr_score,
+
         "last_price": float(round(last_price, 2))
     }
