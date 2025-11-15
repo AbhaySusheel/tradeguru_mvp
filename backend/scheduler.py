@@ -220,6 +220,16 @@ async def _fetch_and_compute(symbol: str, interval="5m", period="1d", retries=3,
                 feats['symbol'] = symbol.replace(".NS", "")
                 feats['last_price'] = feats.get('last_price') or (df['Close'].iloc[-1] if len(df)>0 else None)
                 feats['intraday_pct'] = feats.get('intraday_pct') or ((feats['last_price'] - df['Open'].iloc[0])/df['Open'].iloc[0]*100 if len(df)>0 else 0)
+                # --- ENSURE buy_confidence IS ALWAYS PRESENT ---
+                if 'buy_confidence' not in feats:
+                    
+                    feats['buy_confidence'] = compute_buy_confidence({
+                        "candle_bull": feats.get("candle_bull", 0),
+                        "vol_signal": feats.get("vol_signal", 0),
+                        "trend_phase": feats.get("trend_phase", ""),
+                        "rsi": feats.get("rsi", 50),
+                        "breakout_score": feats.get("breakout_score", 0)
+                    })
                 feats['ts'] = now.isoformat()
                 _PRICE_CACHE[symbol] = (now, feats)
                 return feats
