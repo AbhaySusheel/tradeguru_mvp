@@ -1,0 +1,20 @@
+{
+  "features": [
+    "CLOSE",
+    "ret_1",
+    "ret_2",
+    "ret_3",
+    "ma5",
+    "ma10",
+    "ma20",
+    "std10",
+    "atr14",
+    "atr_pct",
+    "ma5_ma20_diff",
+    "ma5_slope",
+    "rsi14",
+    "vol_mean20",
+    "vol_std20",
+    "vol_zscore"
+  ]
+}
