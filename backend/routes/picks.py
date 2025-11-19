@@ -1,129 +1,160 @@
+# backend/routes/picks.py
 import os
+import math
 import sqlite3
 import asyncio
-import httpx 
 from datetime import datetime as dt
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from scheduler import db_conn
+
+from scheduler import load_universe, run_top_picks_once
 from utils.notifier import send_push
-from scheduler import run_top_picks_once
 from firebase_admin import firestore
-# Import specific Firestore types and errors for robust handling
 from google.cloud.firestore_v1.base_document import DocumentSnapshot
-from google.api_core.exceptions import DeadlineExceeded 
-# Import the base Google Auth exceptions just in case
+from google.api_core.exceptions import DeadlineExceeded
 from google.auth.exceptions import DefaultCredentialsError
 
-CRON_SECRET = os.getenv("CRON_SECRET", "my_secret_token")
+# model engine helper
+from backend.models.stock_model import get_default_engine
+
+# config
+ROUTE_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
+SYMBOL_TIMEOUT_SEC = float(os.getenv("SYMBOL_TIMEOUT_SEC", "10.0"))
+MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "50"))
+DEFAULT_LIMIT = int(os.getenv("TOP_N", "10"))
+
 router = APIRouter()
 
-EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN", "")
-FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
+try:
+    DB_FIRESTORE = firestore.client()
+except Exception:
+    DB_FIRESTORE = None
 
-# -------------------- GLOBAL FIREBASE CLIENT INITIALIZATION --------------------
-# FIX: Initialize the Firestore client once globally. This is the optimal approach.
-DB_FIRESTORE = firestore.client()
-
-
-
-import math
+def _clean_number(x):
+    if isinstance(x, float):
+        if math.isnan(x) or math.isinf(x):
+            return 0.0
+        return x
+    return x
 
 def clean_for_json(obj):
-    """Recursively replace NaN/inf values with 0 for safe JSON serialization."""
     if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return 0.0
-        return obj
-    elif isinstance(obj, list):
+        return _clean_number(obj)
+    if isinstance(obj, list):
         return [clean_for_json(i) for i in obj]
-    elif isinstance(obj, dict):
+    if isinstance(obj, dict):
         return {k: clean_for_json(v) for k, v in obj.items()}
     return obj
 
+_engine_singleton = None
 
-# -------------------- HELPER FOR BLOCKING FIREBASE CALL --------------------
+def get_engine(verbose: bool = False):
+    global _engine_singleton
+    if _engine_singleton is None:
+        _engine_singleton = get_default_engine(verbose=verbose)
+    return _engine_singleton
 
-def _get_top_picks_data_sync(limit: int):
-    """
-    Synchronously fetches data from Firestore using the global client in a separate thread.
-    Added verbose error handling for debugging connection issues.
-    """
-    try:
-        db_firestore = DB_FIRESTORE 
-        doc_ref = db_firestore.collection("top_picks").document("latest")
-        
-        # Blocking synchronous network call with a timeout
-        doc: DocumentSnapshot = doc_ref.get(timeout=5) 
-
-        if not doc.exists:
-            return {"top_picks": [], "message": "No data available yet."}
-
-        data = doc.to_dict().get("data", [])
-        return {"top_picks": data[:limit]}
-    
-    except DeadlineExceeded as e:
-        # Expected timeout error
-        print(f"DEBUG: DeadlineExceeded occurred inside sync function. The read request timed out: {e}")
-        raise e
-    
-    except DefaultCredentialsError as e:
-        # Critical error if credentials are not found/configured
-        print(f"CRITICAL: GOOGLE AUTH ERROR: Default credentials could not be found or are invalid. Check GOOGLE_APPLICATION_CREDENTIALS / Service Account setup. Error: {e}")
-        # Re-raise as an HTTPException precursor
-        raise RuntimeError(f"Authentication Error: {e}")
-        
-    except Exception as e:
-        # Catch any other connection, environment, or unexpected error
-        print(f"CRITICAL: Unhandled error in Firestore sync function: {type(e).__name__}: {e}")
-        # Re-raise to be caught by the async wrapper for the 503 HTTP response
-        raise RuntimeError(f"Internal Firestore Error ({type(e).__name__}): {e}")
-
-# ------------------------- ASYNC ROUTE -------------------------
+async def _analyze_symbol_async(symbol: str, semaphore: asyncio.Semaphore, timeout: float = SYMBOL_TIMEOUT_SEC):
+    engine = get_engine()
+    sym = symbol.replace(".NS", "") if symbol.endswith(".NS") else symbol
+    async with semaphore:
+        try:
+            loop = asyncio.get_running_loop()
+            # pass combine_weights override so combined_score = ml*0.35 + engine*0.65
+            combine_weights = {"ml": 0.35, "engine": 0.65}
+            coro = loop.run_in_executor(None, engine.analyze_stock, sym, True, False, combine_weights, False)
+            result = await asyncio.wait_for(coro, timeout=timeout)
+            if not result or not result.get("ok"):
+                return None
+            # normalize
+            result["combined_score"] = float(result.get("combined_score") or 0.0)
+            result["ml_buy_prob"] = float(result.get("ml_buy_prob") or 0.0)
+            result["engine_score"] = float(result.get("engine_score") or 0.0)
+            result["buy_confidence"] = float(result.get("buy_confidence") or 0.0)
+            result["last_price"] = float(result.get("last_price") or 0.0)
+            return result
+        except asyncio.TimeoutError:
+            print(f"⚠️ Timeout analyzing {symbol}")
+            return None
+        except Exception as e:
+            print(f"❌ Error analyzing {symbol}: {e}")
+            return None
 
 @router.get("/top-picks")
-async def top_picks(limit: int = 10):
-    """Return latest top picks from Firebase Firestore, running the synchronous read in a background thread."""
+async def top_picks(limit: int = DEFAULT_LIMIT, max_symbols: int = MAX_SYMBOLS, batch_size: int = ROUTE_BATCH_SIZE, timeout_sec: float = SYMBOL_TIMEOUT_SEC):
+    limit = int(limit) if limit else DEFAULT_LIMIT
+    if limit <= 0:
+        raise HTTPException(status_code=400, detail="limit must be > 0")
+    batch_size = int(batch_size) if batch_size > 0 else ROUTE_BATCH_SIZE
+    timeout_sec = float(timeout_sec) if timeout_sec > 0 else SYMBOL_TIMEOUT_SEC
+    max_symbols = int(max_symbols) if max_symbols > 0 else MAX_SYMBOLS
+
+    universe = load_universe()
+    if not universe:
+        raise HTTPException(status_code=503, detail="Universe unavailable")
+
+    universe = universe[:max_symbols]
+    sem = asyncio.Semaphore(batch_size)
+
+    tasks = [_analyze_symbol_async(sym, sem, timeout_sec) for sym in universe]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    valid = []
+    for r in results:
+        if isinstance(r, Exception):
+            print("Analysis exception:", r)
+            continue
+        if r and r.get("ok"):
+            valid.append(r)
+
+    if not valid:
+        raise HTTPException(status_code=502, detail="No valid analysis results")
+
+    valid_sorted = sorted(valid, key=lambda x: x.get("combined_score", 0.0), reverse=True)
+    top = valid_sorted[:limit]
+    ts = dt.utcnow().isoformat()
+
+    response_picks = []
+    for t in top:
+        item = {
+            "symbol": t.get("symbol"),
+            "last_price": _clean_number(t.get("last_price", 0.0)),
+            "combined_score": _clean_number(t.get("combined_score", 0.0)),
+            "ml_buy_prob": _clean_number(t.get("ml_buy_prob", 0.0)),
+            "engine_score": _clean_number(t.get("engine_score", 0.0)),
+            "buy_confidence": _clean_number(t.get("buy_confidence", 0.0)),
+            "trade_plan": t.get("trade_plan", {}),
+            "features": t.get("features", {}).get("core", {}),
+            "explanation": t.get("explanation", "")
+        }
+        response_picks.append(clean_for_json(item))
+
+    return {
+        "status": "success",
+        "timestamp": ts,
+        "universe_count": len(universe),
+        "returned": len(response_picks),
+        "top_picks": response_picks
+    }
+
+@router.get("/top-picks/cached")
+async def top_picks_cached(limit: int = DEFAULT_LIMIT):
+    if DB_FIRESTORE is None:
+        raise HTTPException(status_code=503, detail="Firestore client not initialized")
     try:
-        # Run the potentially blocking function in a separate thread
-        result = await asyncio.to_thread(_get_top_picks_data_sync, limit)
-        cleaned = clean_for_json(result)
-        return cleaned
-
-    except DeadlineExceeded as e:
-        print(f"⚠️ Firestore read timeout (DeadlineExceeded): {e}")
-        raise HTTPException(
-            status_code=504, 
-            detail="Failed to fetch data: External API timeout (Firestore)."
-        )
-    except RuntimeError as e:
-        # Catch errors explicitly raised from the sync function (Auth, Unhandled)
-        print(f"⚠️ Runtime Error from Firestore sync function: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Internal Server Error during Firestore fetch. Check credentials/network. Error: {e}"
-        )
+        doc_ref = DB_FIRESTORE.collection("top_picks").document("latest")
+        doc: DocumentSnapshot = await asyncio.to_thread(doc_ref.get, None)
+        if not doc.exists:
+            return {"status": "ok", "top_picks": [], "message": "No cached top picks found"}
+        data = doc.to_dict().get("data", [])[:limit]
+        return {"status": "ok", "top_picks": clean_for_json(data)}
+    except DeadlineExceeded:
+        raise HTTPException(status_code=504, detail="Firestore read timeout")
+    except DefaultCredentialsError as e:
+        raise HTTPException(status_code=500, detail=f"Firestore auth error: {e}")
     except Exception as e:
-        print(f"⚠️ Unexpected error fetching top picks: {e}")
-        raise HTTPException(
-            status_code=503, 
-            detail=f"Service unavailable: Failed to fetch data. Error: {e}"
-        )
+        raise HTTPException(status_code=503, detail=f"Failed to read cached top picks: {e}")
 
-@router.get("/all-stocks")
-def all_stocks(search: str = "", limit: int = 100, offset: int = 0):
-    conn = sqlite3.connect("app.db")
-    c = conn.cursor()
-    if search:
-        q = f"%{search.upper()}%"
-        c.execute("SELECT symbol,last_price,score,intraday_pct,ts FROM all_stocks WHERE symbol LIKE ? ORDER BY score DESC LIMIT ? OFFSET ?",
-                  (q, limit, offset))
-    else:
-        c.execute("SELECT symbol,last_price,score,intraday_pct,ts FROM all_stocks ORDER BY score DESC LIMIT ? OFFSET ?", (limit, offset))
-    rows = c.fetchall()
-    conn.close()
-    return [{"symbol": r[0], "price": r[1], "score": r[2], "change": r[3], "ts": r[4]} for r in rows]
-
-
+# buy/sell endpoints (unchanged)
 @router.post("/buy")
 def buy_stock(payload: dict):
     symbol = payload.get("symbol")
@@ -133,7 +164,6 @@ def buy_stock(payload: dict):
     stop = payload.get("stop", 1.5)
     if not symbol or not price:
         raise HTTPException(status_code=400, detail="symbol and price required")
-
     ts = dt.utcnow().isoformat()
     conn = sqlite3.connect("app.db")
     c = conn.cursor()
@@ -141,17 +171,7 @@ def buy_stock(payload: dict):
               (symbol, price, ts, size, "OPEN", target, stop))
     conn.commit()
     conn.close()
-
-    # Notification logic (assuming send_push is defined elsewhere)
-    # title = f"Bought {symbol}"
-    # body = f"Opened @ ₹{price:.2f} | Target {target}% Stop {stop}%"
-    # if FCM_TEST_TOKEN:
-    # 	 send_push(FCM_TEST_TOKEN, title, body)
-    # if EXPO_PUSH_TOKEN:
-    # 	 send_push(EXPO_PUSH_TOKEN, title, body)
-    
     return {"status": "ok", "message": "Position opened"}
-
 
 @router.post("/sell")
 def sell_stock(payload: dict):
@@ -159,48 +179,25 @@ def sell_stock(payload: dict):
     price = payload.get("price")
     if not symbol or not price:
         raise HTTPException(status_code=400, detail="symbol and price required")
-
     ts = dt.utcnow().isoformat()
     conn = sqlite3.connect("app.db")
     c = conn.cursor()
     c.execute("SELECT entry_price FROM positions WHERE symbol=? AND status='OPEN' ORDER BY id DESC LIMIT 1", (symbol,))
     row = c.fetchone()
     entry_price = row[0] if row else None
-
     c.execute("UPDATE positions SET exit_price=?,exit_ts=?,status='CLOSED' WHERE symbol=? AND status='OPEN'",
               (price, ts, symbol))
     conn.commit()
     conn.close()
-
-    # Notification logic (assuming send_push is defined elsewhere)
-    # pl_text = ""
-    # if entry_price:
-    # 	 pl_pct = (price - entry_price) / entry_price * 100
-    # 	 pl_text = f" Realized P/L: {pl_pct:.2f}%"
-    # 
-    # title = f"Sold {symbol}"
-    # body = f"Closed @ ₹{price:.2f}.{pl_text}"
-    # if FCM_TEST_TOKEN:
-    # 	 send_push(FCM_TEST_TOKEN, title, body)
-    # if EXPO_PUSH_TOKEN:
-    # 	 send_push(EXPO_PUSH_TOKEN, title, body)
-
     return {"status": "ok", "message": "Position closed"}
-
 
 @router.get("/update-top-picks")
 async def update_top_picks(token: str, background_tasks: BackgroundTasks):
+    CRON_SECRET = os.getenv("CRON_SECRET", "my_secret_token")
     if token != CRON_SECRET:
         raise HTTPException(status_code=401, detail="Invalid token")
-
     try:
-        # Uses BackgroundTasks to ensure the HTTP request returns immediately (200 OK)
         background_tasks.add_task(run_top_picks_once)
         return {"status": "ok", "message": "Top picks update STARTED successfully in background."}
-
     except Exception as e:
-        print(f"Error starting top picks task: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Failed to start task: {e}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to start task: {e}")
