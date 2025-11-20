@@ -14,7 +14,7 @@ from google.api_core.exceptions import DeadlineExceeded
 from google.auth.exceptions import DefaultCredentialsError
 
 # model engine helper
-from backend.models.stock_model import get_default_engine
+from models.stock_model import get_default_engine
 
 # config
 ROUTE_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))

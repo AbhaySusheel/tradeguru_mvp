@@ -105,6 +105,34 @@ def upsert_all_stock(s):
     if not success:
         print(f"⚠️ Skipping DB write for {s.get('symbol')} due to locked DB")
 
+def load_universe(csv_path=os.path.join("backend", "tickers.csv")):
+    try:
+        from nsetools import Nse
+        nse = Nse()
+        print("🌐 Fetching live NSE symbols via nsetools...")
+        all_stock_codes = nse.get_stock_codes()
+        universe = []
+        if isinstance(all_stock_codes, dict):
+            universe = [sym + ".NS" for sym in all_stock_codes.keys() if sym != 'SYMBOL']
+        elif isinstance(all_stock_codes, list):
+            universe = [sym + ".NS" for sym in all_stock_codes if sym != 'SYMBOL']
+        if universe:
+            universe = universe[:200]
+            print(f"✅ {len(universe)} symbols loaded for top picks")
+            return universe
+        else:
+            raise ValueError("No symbols returned from nsetools")
+    except Exception as e:
+        print(f"⚠️ Failed fetching live NSE symbols: {e}")
+        if not os.path.exists(csv_path):
+            print(f"⚠️ tickers.csv missing at {csv_path}")
+            return []
+        with open(csv_path) as f:
+            universe = [line.strip() for line in f if line.strip()]
+        universe = universe[:200]
+        print(f"✅ Using {len(universe)} symbols from local CSV fallback")
+        return universe
+
 # ----------------------- SAVE + NOTIFY -----------------------
 def save_top_picks_to_firestore(picks, top_n=TOP_N):
     ts_val = dt.utcnow().isoformat()
