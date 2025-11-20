@@ -11,3 +11,7 @@ firebase-admin
 apscheduler
 requests
 nsetools
+joblib
+scikit-learn
+google-cloud-firestore
+schedule
