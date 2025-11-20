@@ -335,7 +335,10 @@ class StockModel:
     # ---------------------------
     # Public API: analyze_stock
     # ---------------------------
-   def analyze_stock(
+       # ---------------------------
+    # Public API: analyze_stock
+    # ---------------------------
+    def analyze_stock(
         self,
         symbol_or_df: Union[str, pd.DataFrame],
         fetch_if_missing: bool = True,
@@ -344,105 +347,106 @@ class StockModel:
         return_raw: bool = False,
         force_symbol: Optional[str] = None
     ) -> Dict[str, Any]:
-    """
-    Updated version:
-    - You can pass DataFrame + force_symbol="TCS"
-    - Prevents UNKNOWN symbol issues
-    """
-    df = None
+        """
+        Updated version:
+        - You can pass DataFrame + force_symbol="TCS"
+        - Prevents UNKNOWN symbol issues
+        """
+        df = None
 
-    # -------------------------
-    # CASE 1: DataFrame passed
-    # -------------------------
-    if isinstance(symbol_or_df, pd.DataFrame):
-        if force_symbol is None:
-            return {"ok": False, "error": "no_symbol_for_df", "symbol": "UNKNOWN"}
-
-        symbol = force_symbol.strip().upper()
-        df = symbol_or_df.copy().reset_index(drop=True)
-
-    else:
         # -------------------------
-        # CASE 2: Symbol string passed
+        # CASE 1: DataFrame passed
         # -------------------------
-        symbol = str(symbol_or_df).strip().upper()
+        if isinstance(symbol_or_df, pd.DataFrame):
+            if force_symbol is None:
+                return {"ok": False, "error": "no_symbol_for_df", "symbol": "UNKNOWN"}
 
-        if not symbol.endswith(".NS"):
-            symbol_ns = symbol + ".NS"
+            symbol = force_symbol.strip().upper()
+            df = symbol_or_df.copy().reset_index(drop=True)
+
         else:
-            symbol_ns = symbol
+            # -------------------------
+            # CASE 2: Symbol string passed
+            # -------------------------
+            symbol = str(symbol_or_df).strip().upper()
 
-        if fetch_if_missing:
-            df = fetch_intraday(symbol_ns, period="1d", interval="5m")
-            if df is None or len(df) < 10:
-                return {"ok": False, "error": "fetch_failed", "symbol": symbol}
+            if not symbol.endswith(".NS"):
+                symbol_ns = symbol + ".NS"
+            else:
+                symbol_ns = symbol
+
+            if fetch_if_missing:
+                df = fetch_intraday(symbol_ns, period="1d", interval="5m")
+                if df is None or len(df) < 10:
+                    return {"ok": False, "error": "fetch_failed", "symbol": symbol}
+            else:
+                return {"ok": False, "error": "no_df_provided", "symbol": symbol}
+
+        # ------------------------------------
+        # Base feature extraction
+        # ------------------------------------
+        base_feats = compute_features(df)
+        if base_feats is None:
+            return {"ok": False, "error": "compute_features_failed", "symbol": symbol}
+
+        # ------------------------------------
+        # ML part
+        # ------------------------------------
+        ml_input = self._augment_features_for_ml(df, base_feats)
+        ml_prob = self._predict_ml_prob(ml_input)
+
+        # ------------------------------------
+        # Engine score
+        # ------------------------------------
+        try:
+            engine_scored = score_from_features([base_feats])
+            engine_score = engine_scored[0].get("score", 0.0) if engine_scored else 0.0
+        except:
+            engine_score = 0.0
+
+        # ------------------------------------
+        # Combined score
+        # ------------------------------------
+        combined_score = self.combine_scores(
+            ml_prob,
+            engine_score,
+            combine_weights or self.combine_weights
+        )
+
+        label = _label_from_prob_and_score(ml_prob, combined_score)
+
+        # ------------------------------------
+        # Trade plan
+        # ------------------------------------
+        entry = float(base_feats.get("last_price", float(df["Close"].iloc[-1])))
+        atr_val = float(ml_input.get("atr_val", 0.0))
+
+        if math.isnan(atr_val) or atr_val <= 0:
+            sl = entry * 0.99
+            targets = [entry * 1.02, entry * 1.04]
         else:
-            return {"ok": False, "error": "no_df_provided", "symbol": symbol}
+            sl = entry - atr_val
+            targets = [entry + atr_val * r for r in (1.5, 2.5, 4.0)]
 
-    # ------------------------------------
-    # Base feature extraction
-    # ------------------------------------
-    base_feats = compute_features(df)
-    if base_feats is None:
-        return {"ok": False, "error": "compute_features_failed", "symbol": symbol}
-
-    # ------------------------------------
-    # ML part
-    # ------------------------------------
-    ml_input = self._augment_features_for_ml(df, base_feats)
-    ml_prob = self._predict_ml_prob(ml_input)
-
-    # ------------------------------------
-    # Engine score
-    # ------------------------------------
-    try:
-        engine_scored = score_from_features([base_feats])
-        engine_score = engine_scored[0].get("score", 0.0) if engine_scored else 0.0
-    except:
-        engine_score = 0.0
-
-    # ------------------------------------
-    # Combined score
-    # ------------------------------------
-    combined_score = self.combine_scores(
-        ml_prob,
-        engine_score,
-        combine_weights or self.combine_weights
-    )
-
-    label = _label_from_prob_and_score(ml_prob, combined_score)
-
-    # ------------------------------------
-    # Trade plan
-    # ------------------------------------
-    entry = float(base_feats.get("last_price", float(df["Close"].iloc[-1])))
-    atr_val = float(ml_input.get("atr_val", 0.0))
-
-    if math.isnan(atr_val) or atr_val <= 0:
-        sl = entry * 0.99
-        targets = [entry * 1.02, entry * 1.04]
-    else:
-        sl = entry - atr_val
-        targets = [entry + atr_val * r for r in (1.5, 2.5, 4.0)]
-
-    # Final structured output
-    result = {
-        "ok": True,
-        "symbol": symbol.replace(".NS", "").upper(),
-        "last_price": float(entry),
-        "ml_buy_prob": float(round(ml_prob, 4)),
-        "engine_score": float(round(engine_score, 4)),
-        "combined_score": float(round(combined_score, 4)),
-        "label": label,
-        "buy_confidence": float(round(base_feats.get("buy_confidence", 0), 4)),
-        "trade_plan": {
-            "entry": float(entry),
-            "sl": float(sl),
-            "targets": [float(round(t, 4)) for t in targets]
+        # Final structured output
+        result = {
+            "ok": True,
+            "symbol": symbol.replace(".NS", "").upper(),
+            "last_price": float(entry),
+            "ml_buy_prob": float(round(ml_prob, 4)),
+            "engine_score": float(round(engine_score, 4)),
+            "combined_score": float(round(combined_score, 4)),
+            "label": label,
+            "buy_confidence": float(round(base_feats.get("buy_confidence", 0), 4)),
+            "trade_plan": {
+                "entry": float(entry),
+                "sl": float(sl),
+                "targets": [float(round(t, 4)) for t in targets]
+            }
         }
-    }
 
-    return result
+        return result
+
 
 
 # ---------------------------
