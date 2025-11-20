@@ -2,27 +2,25 @@
 """
 StockModel - Unified ML + Technical Engine (high-accuracy mode)
 
-Features:
-- Loads joblib model bundle saved by train_xgboost_v3.py (expects keys: 'booster','scaler','features','best_iteration' optional)
-- Loads model_features_v3.json (exact feature order)
-- Accepts either a pre-fetched DataFrame or fetches intraday via utils.market.fetch_intraday
-- Uses market.compute_features() then augments with many ML-specific features (rolling returns, vol, ATR%, wick ratios, price-percentile, RSI slope, etc.)
-- Predicts ML buy probability and composes a final combined score with engine score.
-- Public API: StockModel.analyze_stock(symbol_or_df, fetch_if_missing=True, combine_weights=None)
+Key updates:
+- DEFAULT_COMBINE_WEIGHTS set to ml:0.35, engine:0.65 (your requested weighting)
+- analyze_stock() updated to accept force_symbol and never return "UNKNOWN" symbol
+- debug logging added
 """
 
 from __future__ import annotations
 import json
 import math
+import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple, Union
+from typing import Dict, Any, Optional, List, Union
 
 import numpy as np
 import pandas as pd
 import joblib
 import xgboost as xgb
 
-# import utils (adjust path if needed)
+# utils (paths assume working dir = backend/)
 from utils.market import fetch_intraday, compute_features
 from utils.score import score_from_features
 from utils.buy_confidence_utils import compute_buy_confidence
@@ -30,16 +28,23 @@ from utils.atr_utils import compute_atr, compute_volatility_regime
 from utils.candle_utils import get_candle_features
 from utils.swing_utils import compute_trend_structure
 
+logger = logging.getLogger("stock_model")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(ch)
+
 # ---------------------------
 # Configuration / Defaults
 # ---------------------------
 DEFAULT_MODEL_PATH = str(Path(__file__).parent / "xgb_buyprob_model_v3.joblib")
 DEFAULT_FEATURES_PATH = str(Path(__file__).parent / "model_features_v3.json")
 
-# default combination weights (ml heavier for accuracy)
+# default combination weights (ml lighter, engine heavier as requested)
 DEFAULT_COMBINE_WEIGHTS = {
-    "ml": 0.65,       # weight for ML probability
-    "engine": 0.35    # weight for your rule-based engine score
+    "ml": 0.35,       # weight for ML probability
+    "engine": 0.65    # weight for rule-based engine score
 }
 
 # ---------------------------
@@ -108,24 +113,21 @@ class StockModel:
         p = Path(self.model_bundle_path)
         if not p.exists():
             if self.verbose:
-                print(f"[StockModel] Model bundle {p} not found, ML disabled.")
+                logger.warning(f"[StockModel] Model bundle {p} not found, ML disabled.")
             return
         bundle = joblib.load(str(p))
         # train script stored dict with keys: 'booster','scaler','features','best_iteration'
-        self.booster = bundle.get("booster", None)
-        self.scaler = bundle.get("scaler", None)
-        # If saved directly as a Booster rather than inside dict:
-        if isinstance(bundle, xgb.Booster):
-            self.booster = bundle
+        self.booster = bundle.get("booster", None) if isinstance(bundle, dict) else (bundle if isinstance(bundle, xgb.Booster) else None)
+        self.scaler = bundle.get("scaler", None) if isinstance(bundle, dict) else None
         self.best_iteration = bundle.get("best_iteration", None) if isinstance(bundle, dict) else None
         if self.verbose:
-            print(f"[StockModel] Loaded model bundle from {p} - booster: {self.booster is not None}")
+            logger.info(f"[StockModel] Loaded model bundle from {p} - booster: {self.booster is not None}")
 
     def _load_feature_order(self):
         p = Path(self.model_features_path)
         if not p.exists():
             if self.verbose:
-                print(f"[StockModel] Feature order {p} not found, falling back to model-bundle features if present.")
+                logger.warning(f"[StockModel] Feature order {p} not found, falling back to model-bundle features if present.")
             return
         try:
             d = json.loads(p.read_text(encoding="utf8"))
@@ -134,13 +136,12 @@ class StockModel:
             elif isinstance(d, list):
                 self.feature_order = list(d)
             else:
-                # try to interpret keys as features
                 self.feature_order = list(d.get("features", [])) if isinstance(d, dict) else []
             if self.verbose:
-                print(f"[StockModel] Loaded {len(self.feature_order)} model features from {p}")
+                logger.info(f"[StockModel] Loaded {len(self.feature_order)} model features from {p}")
         except Exception as e:
             if self.verbose:
-                print(f"[StockModel] Failed to load feature order: {e}")
+                logger.warning(f"[StockModel] Failed to load feature order: {e}")
             self.feature_order = []
 
     # ---------------------------
@@ -164,7 +165,6 @@ class StockModel:
             try:
                 X = self.scaler.transform(X)
             except Exception:
-                # ignore scaler errors
                 pass
 
         dmat = xgb.DMatrix(X, feature_names=self.feature_order if self.feature_order else None)
@@ -174,34 +174,19 @@ class StockModel:
             else:
                 pred = self.booster.predict(dmat)
             p = float(pred[0]) if hasattr(pred, "__len__") else float(pred)
-            # clamp
             return max(0.0, min(1.0, p))
         except Exception as e:
             if self.verbose:
-                print(f"[StockModel] ML prediction error: {e}")
-            # fallback nan
+                logger.warning(f"[StockModel] ML prediction error: {e}")
             return float("nan")
 
     # ---------------------------
-    # Extra Feature Engineering (Option B - high accuracy)
+    # Extra Feature Engineering
     # ---------------------------
     def _augment_features_for_ml(self, df: pd.DataFrame, feats: Dict[str, Any]) -> Dict[str, float]:
-        """
-        Starting from compute_features() output (feats) augment with additional features ML likes:
-        - returns (last, 1/3/5/10)
-        - rolling std of returns
-        - close relative to 52/75 lookback highs/lows
-        - ATR normalized by price
-        - candle body ratio & wick ratios
-        - RSI slope, MACD hist
-        - volume delta features
-        - price percentile across lookback
-        """
-        out = dict(feats)  # copy existing
-        # safe guards
+        out = dict(feats)
         if df is None or df.empty:
             return out
-
         close = df["Close"].astype(float)
         high = df["High"].astype(float)
         low = df["Low"].astype(float)
@@ -258,9 +243,6 @@ class StockModel:
 
         # RSI slope
         try:
-            rsi_series = pd.Series([feats.get("rsi", 50)])  # fallback
-            # rebuild small RSI series from close if possible
-            # approximate RSI slope using small window of price returns:
             out["rsi_slope_3"] = float((close.tail(3).pct_change().mean()) if len(close) >= 3 else 0.0)
         except Exception:
             out["rsi_slope_3"] = 0.0
@@ -279,7 +261,7 @@ class StockModel:
         try:
             swing = compute_trend_structure(df)
             out["swing_score_raw"] = float(swing.get("swing_score", 50))
-            out["trend_phase_tag"] = 1 if swing.get("trend_phase") == "uptrend" else ( -1 if swing.get("trend_phase") == "downtrend" else 0)
+            out["trend_phase_tag"] = 1 if swing.get("trend_phase") == "uptrend" else (-1 if swing.get("trend_phase") == "downtrend" else 0)
         except Exception:
             out["swing_score_raw"] = 50.0
             out["trend_phase_tag"] = 0
@@ -304,10 +286,9 @@ class StockModel:
             out["atr_pct_util"] = 0.0
             out["vol_regime_tag"] = 1
 
-        # normalize/ensure numeric types for ML
+        # normalize numeric types for ML
         for k, v in list(out.items()):
             if isinstance(v, (list, dict)):
-                # skip complex structures; ML expects flat numeric features
                 out.pop(k, None)
             else:
                 try:
@@ -321,21 +302,17 @@ class StockModel:
     # ---------------------------
     def combine_scores(self, ml_prob: float, engine_score: float, weights: Optional[Dict[str, float]] = None) -> float:
         w = weights or self.combine_weights
-        ml_w = w.get("ml", 0.65)
-        eng_w = w.get("engine", 0.35)
+        ml_w = float(w.get("ml", 0.35))
+        eng_w = float(w.get("engine", 0.65))
         total = ml_w + eng_w
         if total <= 0:
             total = 1.0
         ml_p = 0.0 if math.isnan(ml_prob) else float(ml_prob)
         eng_p = 0.0 if math.isnan(engine_score) else float(engine_score)
         combined = (ml_w * ml_p + eng_w * eng_p) / total
-        # clamp
         return float(max(0.0, min(1.0, combined)))
 
     # ---------------------------
-    # Public API: analyze_stock
-    # ---------------------------
-       # ---------------------------
     # Public API: analyze_stock
     # ---------------------------
     def analyze_stock(
@@ -348,79 +325,72 @@ class StockModel:
         force_symbol: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Updated version:
-        - You can pass DataFrame + force_symbol="TCS"
-        - Prevents UNKNOWN symbol issues
+        Updated analyze_stock:
+        - if DataFrame is passed, use force_symbol to ensure correct naming.
+        - always returns symbol correctly as upper-case w/o .NS
+        - logs debug information
         """
+        symbol = None
         df = None
 
-        # -------------------------
-        # CASE 1: DataFrame passed
-        # -------------------------
+        # CASE: DataFrame passed
         if isinstance(symbol_or_df, pd.DataFrame):
             if force_symbol is None:
+                logger.warning("[analyze_stock] DataFrame provided without force_symbol -> rejecting")
                 return {"ok": False, "error": "no_symbol_for_df", "symbol": "UNKNOWN"}
-
             symbol = force_symbol.strip().upper()
             df = symbol_or_df.copy().reset_index(drop=True)
-
+            if symbol.endswith(".NS"):
+                symbol = symbol.replace(".NS", "")
         else:
-            # -------------------------
-            # CASE 2: Symbol string passed
-            # -------------------------
+            # CASE: string symbol passed
             symbol = str(symbol_or_df).strip().upper()
-
-            if not symbol.endswith(".NS"):
-                symbol_ns = symbol + ".NS"
-            else:
-                symbol_ns = symbol
+            symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
 
             if fetch_if_missing:
-                df = fetch_intraday(symbol_ns, period="1d", interval="5m")
-                if df is None or len(df) < 10:
-                    return {"ok": False, "error": "fetch_failed", "symbol": symbol}
+                try:
+                    df = fetch_intraday(symbol_ns, period="1d", interval="5m")
+                except Exception as e:
+                    logger.debug(f"[analyze_stock] fetch_intraday exception for {symbol_ns}: {e}")
+                    df = None
+                if df is None or len(df) < 2:
+                    logger.info(f"[analyze_stock] fetch failed or too short for {symbol_ns}")
+                    return {"ok": False, "error": "no_data", "symbol": symbol}
             else:
+                logger.info(f"[analyze_stock] fetch_if_missing=False and no df provided for {symbol}")
                 return {"ok": False, "error": "no_df_provided", "symbol": symbol}
 
-        # ------------------------------------
-        # Base feature extraction
-        # ------------------------------------
+        # Base features
         base_feats = compute_features(df)
         if base_feats is None:
+            logger.info(f"[analyze_stock] compute_features failed for {symbol}")
             return {"ok": False, "error": "compute_features_failed", "symbol": symbol}
 
-        # ------------------------------------
-        # ML part
-        # ------------------------------------
+        # ML input + ML prob
         ml_input = self._augment_features_for_ml(df, base_feats)
         ml_prob = self._predict_ml_prob(ml_input)
+        if math.isnan(ml_prob):
+            ml_prob = 0.0
 
-        # ------------------------------------
         # Engine score
-        # ------------------------------------
         try:
             engine_scored = score_from_features([base_feats])
             engine_score = engine_scored[0].get("score", 0.0) if engine_scored else 0.0
-        except:
+        except Exception as e:
+            logger.debug(f"[analyze_stock] score_from_features error for {symbol}: {e}")
             engine_score = 0.0
 
-        # ------------------------------------
-        # Combined score
-        # ------------------------------------
-        combined_score = self.combine_scores(
-            ml_prob,
-            engine_score,
-            combine_weights or self.combine_weights
-        )
+        # Combine (weights may be overridden)
+        weights = combine_weights or self.combine_weights
+        combined_score = self.combine_scores(ml_prob, engine_score, weights)
 
+        # Label and buy confidence
         label = _label_from_prob_and_score(ml_prob, combined_score)
+        buy_conf = _safe_float(base_feats.get("buy_confidence", compute_buy_confidence(base_feats)))
 
-        # ------------------------------------
         # Trade plan
-        # ------------------------------------
         entry = float(base_feats.get("last_price", float(df["Close"].iloc[-1])))
         atr_val = float(ml_input.get("atr_val", 0.0))
-
         if math.isnan(atr_val) or atr_val <= 0:
             sl = entry * 0.99
             targets = [entry * 1.02, entry * 1.04]
@@ -428,7 +398,9 @@ class StockModel:
             sl = entry - atr_val
             targets = [entry + atr_val * r for r in (1.5, 2.5, 4.0)]
 
-        # Final structured output
+        # Debug log
+        logger.info(f"[analyze_stock] {symbol} price={entry:.4f} intraday_pct={base_feats.get('intraday_pct')} ml_prob={ml_prob:.4f} engine={engine_score:.4f} combined={combined_score:.4f} buy_conf={buy_conf:.2f}")
+
         result = {
             "ok": True,
             "symbol": symbol.replace(".NS", "").upper(),
@@ -437,21 +409,31 @@ class StockModel:
             "engine_score": float(round(engine_score, 4)),
             "combined_score": float(round(combined_score, 4)),
             "label": label,
-            "buy_confidence": float(round(base_feats.get("buy_confidence", 0), 4)),
-            "trade_plan": {
-                "entry": float(entry),
-                "sl": float(sl),
-                "targets": [float(round(t, 4)) for t in targets]
-            }
+            "buy_confidence": float(round(buy_conf, 4)),
+            "trade_plan": {"entry": float(entry), "sl": float(sl), "targets": [float(round(t, 4)) for t in targets]},
+            "features": {
+                "core": {
+                    "intraday_pct": base_feats.get("intraday_pct"),
+                    "ma_short": base_feats.get("ma_short"),
+                    "ma_long": base_feats.get("ma_long"),
+                    "ma_diff": base_feats.get("ma_diff"),
+                    "rsi": base_feats.get("rsi"),
+                    "vol_ratio": base_feats.get("vol_ratio"),
+                    "vol_strength": base_feats.get("vol_strength"),
+                    "sr_score": base_feats.get("sr_score"),
+                    "buy_confidence": base_feats.get("buy_confidence"),
+                },
+                "ml_vector_preview": {k: ml_input.get(k) for k in list(ml_input.keys())[:60]}
+            },
+            "explanation": f"ML_prob={round(ml_prob,3)} | engine_score={round(engine_score,3)} | buy_conf={round(buy_conf,2)}"
         }
+
+        if return_raw:
+            result["raw"] = {"base_feats": base_feats, "ml_input": ml_input}
 
         return result
 
-
-
-# ---------------------------
-# Convenience single-instance for app usage
-# ---------------------------
+# Singleton convenience
 _default_engine: Optional[StockModel] = None
 
 def get_default_engine(model_bundle_path: Optional[str] = None, features_path: Optional[str] = None, verbose: bool = False) -> StockModel:
@@ -460,9 +442,7 @@ def get_default_engine(model_bundle_path: Optional[str] = None, features_path: O
         _default_engine = StockModel(model_bundle_path=model_bundle_path, model_features_path=features_path, verbose=verbose)
     return _default_engine
 
-# ---------------------------
-# CLI quick test (not executed on import)
-# ---------------------------
+# CLI quick test
 if __name__ == "__main__":
     import argparse, pprint
     parser = argparse.ArgumentParser()
