@@ -15,3 +15,4 @@ joblib
 scikit-learn
 google-cloud-firestore
 schedule
+xgboost
