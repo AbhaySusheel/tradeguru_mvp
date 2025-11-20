@@ -12,8 +12,8 @@ import asyncio
 import traceback
 from typing import List, Dict, Any
 
-from backend.models.stock_model import get_default_engine
-from backend.utils.market import fetch_intraday
+from models.stock_model import get_default_engine
+from utils.market import fetch_intraday
 
 # Shared model instance
 MODEL = get_default_engine(verbose=False)
