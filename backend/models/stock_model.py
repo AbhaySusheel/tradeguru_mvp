@@ -335,111 +335,115 @@ class StockModel:
     # ---------------------------
     # Public API: analyze_stock
     # ---------------------------
-    def analyze_stock(
+   def analyze_stock(
         self,
         symbol_or_df: Union[str, pd.DataFrame],
         fetch_if_missing: bool = True,
         ml_only: bool = False,
         combine_weights: Optional[Dict[str, float]] = None,
         return_raw: bool = False,
+        force_symbol: Optional[str] = None
     ) -> Dict[str, Any]:
-        """
-        Main entry point.
-        - symbol_or_df: either symbol string (e.g., "TCS" or "TCS.NS") or a pandas DataFrame (OHLCV)
-        - fetch_if_missing: if a symbol is passed and DataFrame is not available, it will fetch via fetch_intraday()
-        - ml_only: if True returns only ML prediction and features (skips engine scoring)
-        - combine_weights: optional override for final combination weights
-        - return_raw: if True includes raw intermediate dicts (features, augmented features)
-        """
-        # get df
-        df = None
-        symbol = None
-        if isinstance(symbol_or_df, pd.DataFrame):
-            df = symbol_or_df.copy().reset_index(drop=True)
-            symbol = "UNKNOWN"
+    """
+    Updated version:
+    - You can pass DataFrame + force_symbol="TCS"
+    - Prevents UNKNOWN symbol issues
+    """
+    df = None
+
+    # -------------------------
+    # CASE 1: DataFrame passed
+    # -------------------------
+    if isinstance(symbol_or_df, pd.DataFrame):
+        if force_symbol is None:
+            return {"ok": False, "error": "no_symbol_for_df", "symbol": "UNKNOWN"}
+
+        symbol = force_symbol.strip().upper()
+        df = symbol_or_df.copy().reset_index(drop=True)
+
+    else:
+        # -------------------------
+        # CASE 2: Symbol string passed
+        # -------------------------
+        symbol = str(symbol_or_df).strip().upper()
+
+        if not symbol.endswith(".NS"):
+            symbol_ns = symbol + ".NS"
         else:
-            symbol = str(symbol_or_df).strip()
-            if symbol.endswith(".NS") is False:
-                symbol_ns = symbol + ".NS"
-            else:
-                symbol_ns = symbol
-            # fetch
-            if fetch_if_missing:
-                df = fetch_intraday(symbol_ns, period="1d", interval="5m")
-                if df is None:
-                    return {"ok": False, "error": "no_data", "symbol": symbol}
-            else:
-                return {"ok": False, "error": "no_df_provided", "symbol": symbol}
+            symbol_ns = symbol
 
-        # compute base features via market.compute_features
-        base_feats = compute_features(df)
-        if base_feats is None:
-            return {"ok": False, "error": "compute_features_failed", "symbol": symbol}
-
-        # augment features for ML
-        ml_input = self._augment_features_for_ml(df, base_feats)
-
-        # Generate ML probability
-        ml_prob = self._predict_ml_prob(ml_input)
-
-        # Engine score: we adapt score_from_features expects list input
-        try:
-            engine_scored = score_from_features([base_feats])
-            engine_score = engine_scored[0].get("score", 0.0) if engine_scored else 0.0
-        except Exception:
-            engine_score = 0.0
-
-        # Combined
-        combined_score = self.combine_scores(ml_prob, engine_score, combine_weights or self.combine_weights)
-
-        # label
-        label = _label_from_prob_and_score(ml_prob, combined_score)
-
-        # buy confidence
-        buy_conf = _safe_float(base_feats.get("buy_confidence", compute_buy_confidence(base_feats)))
-
-        # trade plan (simple ATR-based targets)
-        entry = float(base_feats.get("last_price", float(df["Close"].iloc[-1])))
-        atr_val = float(ml_input.get("atr_val", 0.0))
-        if math.isnan(atr_val) or atr_val <= 0:
-            sl = entry * 0.99
-            targets = [entry * 1.02, entry * 1.04]
+        if fetch_if_missing:
+            df = fetch_intraday(symbol_ns, period="1d", interval="5m")
+            if df is None or len(df) < 10:
+                return {"ok": False, "error": "fetch_failed", "symbol": symbol}
         else:
-            sl = entry - atr_val
-            targets = [entry + atr_val * r for r in (1.5, 2.5, 4.0)]
+            return {"ok": False, "error": "no_df_provided", "symbol": symbol}
 
-        result = {
-            "ok": True,
-            "symbol": symbol.replace(".NS", "").upper(),
-            "last_price": float(entry),
-            "ml_buy_prob": None if math.isnan(ml_prob) else float(round(ml_prob, 4)),
-            "engine_score": float(round(engine_score, 4)),
-            "combined_score": float(round(combined_score, 4)),
-            "label": label,
-            "buy_confidence": float(round(buy_conf, 4)),
-            "trade_plan": {"entry": float(entry), "sl": float(sl), "targets": [float(round(t, 4)) for t in targets]},
-            "features": {
-                # return a subset for storage/transmission (avoid huge dict); but include key ML inputs
-                "core": {
-                    "intraday_pct": base_feats.get("intraday_pct"),
-                    "ma_short": base_feats.get("ma_short"),
-                    "ma_long": base_feats.get("ma_long"),
-                    "ma_diff": base_feats.get("ma_diff"),
-                    "rsi": base_feats.get("rsi"),
-                    "vol_ratio": base_feats.get("vol_ratio"),
-                    "vol_strength": base_feats.get("vol_strength"),
-                    "sr_score": base_feats.get("sr_score"),
-                    "buy_confidence": base_feats.get("buy_confidence"),
-                },
-                "ml_vector_preview": {k: ml_input.get(k) for k in list(ml_input.keys())[:60]}  # preview first 60 numeric keys
-            },
-            "explanation": f"ML_prob={round(ml_prob,3) if not math.isnan(ml_prob) else 'N/A'} | engine_score={round(engine_score,3)} | buy_conf={round(buy_conf,2)}"
+    # ------------------------------------
+    # Base feature extraction
+    # ------------------------------------
+    base_feats = compute_features(df)
+    if base_feats is None:
+        return {"ok": False, "error": "compute_features_failed", "symbol": symbol}
+
+    # ------------------------------------
+    # ML part
+    # ------------------------------------
+    ml_input = self._augment_features_for_ml(df, base_feats)
+    ml_prob = self._predict_ml_prob(ml_input)
+
+    # ------------------------------------
+    # Engine score
+    # ------------------------------------
+    try:
+        engine_scored = score_from_features([base_feats])
+        engine_score = engine_scored[0].get("score", 0.0) if engine_scored else 0.0
+    except:
+        engine_score = 0.0
+
+    # ------------------------------------
+    # Combined score
+    # ------------------------------------
+    combined_score = self.combine_scores(
+        ml_prob,
+        engine_score,
+        combine_weights or self.combine_weights
+    )
+
+    label = _label_from_prob_and_score(ml_prob, combined_score)
+
+    # ------------------------------------
+    # Trade plan
+    # ------------------------------------
+    entry = float(base_feats.get("last_price", float(df["Close"].iloc[-1])))
+    atr_val = float(ml_input.get("atr_val", 0.0))
+
+    if math.isnan(atr_val) or atr_val <= 0:
+        sl = entry * 0.99
+        targets = [entry * 1.02, entry * 1.04]
+    else:
+        sl = entry - atr_val
+        targets = [entry + atr_val * r for r in (1.5, 2.5, 4.0)]
+
+    # Final structured output
+    result = {
+        "ok": True,
+        "symbol": symbol.replace(".NS", "").upper(),
+        "last_price": float(entry),
+        "ml_buy_prob": float(round(ml_prob, 4)),
+        "engine_score": float(round(engine_score, 4)),
+        "combined_score": float(round(combined_score, 4)),
+        "label": label,
+        "buy_confidence": float(round(base_feats.get("buy_confidence", 0), 4)),
+        "trade_plan": {
+            "entry": float(entry),
+            "sl": float(sl),
+            "targets": [float(round(t, 4)) for t in targets]
         }
+    }
 
-        if return_raw:
-            result["raw"] = {"base_feats": base_feats, "ml_input": ml_input}
+    return result
 
-        return result
 
 # ---------------------------
 # Convenience single-instance for app usage

@@ -13,10 +13,8 @@ from google.cloud.firestore_v1.base_document import DocumentSnapshot
 from google.api_core.exceptions import DeadlineExceeded
 from google.auth.exceptions import DefaultCredentialsError
 
-# model engine helper
 from models.stock_model import get_default_engine
 
-# config
 ROUTE_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
 SYMBOL_TIMEOUT_SEC = float(os.getenv("SYMBOL_TIMEOUT_SEC", "10.0"))
 MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "50"))
@@ -55,22 +53,36 @@ def get_engine(verbose: bool = False):
 
 async def _analyze_symbol_async(symbol: str, semaphore: asyncio.Semaphore, timeout: float = SYMBOL_TIMEOUT_SEC):
     engine = get_engine()
-    sym = symbol.replace(".NS", "") if symbol.endswith(".NS") else symbol
+    # expecting symbol maybe 'TCS' or 'TCS.NS'
+    sym = str(symbol).strip().upper()
+    fetch_sym = sym if sym.endswith(".NS") else sym + ".NS"
+
+    # combine weights: ml 35% + engine 65%
+    combine_weights = {"ml": 0.35, "engine": 0.65}
+
     async with semaphore:
         try:
             loop = asyncio.get_running_loop()
-            # pass combine_weights override so combined_score = ml*0.35 + engine*0.65
-            combine_weights = {"ml": 0.35, "engine": 0.65}
-            coro = loop.run_in_executor(None, engine.analyze_stock, sym, True, False, combine_weights, False)
-            result = await asyncio.wait_for(coro, timeout=timeout)
+            # fetch df then call analyze_stock with df and force_symbol
+            from utils.market import fetch_intraday
+            df = await asyncio.to_thread(fetch_intraday, fetch_sym, "1d", "5m")
+            if df is None or df.empty:
+                print(f"⚠️ No data for {sym}")
+                return None
+            # call analyze_stock in threadpool with combine_weights and force_symbol
+            def run():
+                return engine.analyze_stock(df, False, False, combine_weights, False, sym.replace(".NS", ""))
+            result = await asyncio.wait_for(loop.run_in_executor(None, run), timeout=timeout)
             if not result or not result.get("ok"):
                 return None
-            # normalize
+            # normalize numeric fields
             result["combined_score"] = float(result.get("combined_score") or 0.0)
             result["ml_buy_prob"] = float(result.get("ml_buy_prob") or 0.0)
             result["engine_score"] = float(result.get("engine_score") or 0.0)
             result["buy_confidence"] = float(result.get("buy_confidence") or 0.0)
             result["last_price"] = float(result.get("last_price") or 0.0)
+            # ensure proper symbol naming
+            result["symbol"] = str(result.get("symbol")).upper().replace(".NS", "")
             return result
         except asyncio.TimeoutError:
             print(f"⚠️ Timeout analyzing {symbol}")
@@ -154,7 +166,7 @@ async def top_picks_cached(limit: int = DEFAULT_LIMIT):
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Failed to read cached top picks: {e}")
 
-# buy/sell endpoints (unchanged)
+# preserved buy/sell/update endpoints unchanged...
 @router.post("/buy")
 def buy_stock(payload: dict):
     symbol = payload.get("symbol")
