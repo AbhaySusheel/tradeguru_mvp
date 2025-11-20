@@ -11,7 +11,7 @@ import asyncio
 import json
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime as dt, timedelta, timezone
+from datetime import datetime as dt, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from engine.top_picks_engine import generate_top_picks
@@ -105,6 +105,7 @@ def upsert_all_stock(s):
     if not success:
         print(f"⚠️ Skipping DB write for {s.get('symbol')} due to locked DB")
 
+# ----------------------- LOAD UNIVERSE -----------------------
 def load_universe(csv_path=os.path.join("backend", "tickers.csv")):
     try:
         from nsetools import Nse
@@ -142,8 +143,8 @@ def save_top_picks_to_firestore(picks, top_n=TOP_N):
             "ts": ts_val,
             "symbol": p.get("symbol"),
             "last_price": p.get("last_price"),
-            "score": p.get("score"),
-            "intraday_pct": p.get("intraday_pct")
+            "score": p.get("combined_score", p.get("score")),
+            "intraday_pct": p.get("features", {}).get("core", {}).get("intraday_pct")
         })
     try:
         doc_ref = db_firestore.collection("top_picks").document("latest")
@@ -171,44 +172,43 @@ scheduler = BackgroundScheduler()
 
 async def generate_and_store_top_picks(universe, limit=TOP_N):
     """
-    Generate top picks using backend.engine.top_picks_engine.generate_top_picks
+    Generate top picks using engine.top_picks_engine.generate_top_picks
     which internally calls StockModel with combine_weights override.
     """
-    # generate picks (engine uses StockModel with combine_weights override)
     picks = await generate_top_picks(universe, limit)
     ts_val = dt.utcnow().isoformat()
 
-    # persist in SQLite and Firestore, and optionally notify
+    # persist in SQLite
     for p in picks:
+        # guard: skip invalid
+        if not p or not p.get("ok") or not p.get("symbol"):
+            continue
         p['ts'] = ts_val
-        # make sure numeric fields present
-        p['score'] = float(p.get('combined_score', 0.0))
-        p['last_price'] = float(p.get('last_price', 0.0))
-        p['intraday_pct'] = float(p.get('features', {}).get('core', {}).get('intraday_pct', 0.0)) if isinstance(p.get('features', {}), dict) else 0.0
-        # upsert to all_stocks (mapping to expected columns)
+        # numeric coercion with fallbacks
+        combined = float(p.get('combined_score', p.get('score', 0.0)) or 0.0)
+        last_price = float(p.get('last_price', 0.0) or 0.0)
+        intraday_pct = float(p.get('features', {}).get('core', {}).get('intraday_pct', 0.0) or 0.0)
+
         upsert_all_stock({
             'symbol': p.get('symbol'),
-            'last_price': p['last_price'],
-            'intraday_pct': p['intraday_pct'],
+            'last_price': last_price,
+            'intraday_pct': intraday_pct,
             'ma_diff': p.get('features', {}).get('core', {}).get('ma_diff', 0.0),
             'vol_ratio': p.get('features', {}).get('core', {}).get('vol_ratio', 0.0),
             'rsi': p.get('features', {}).get('core', {}).get('rsi', 50.0),
-            'score': p['score'],
+            'score': combined,
             'ts': ts_val
         })
 
     # Save to Firestore
-    try:
-        save_top_picks_to_firestore(picks, top_n=limit)
-    except Exception as e:
-        print("Firestore save failed:", e)
+    save_top_picks_to_firestore(picks, top_n=limit)
 
-    # Send notifications for very strong picks
+    # Send notifications for strong picks
     try:
         top0 = picks[0] if picks else None
-        if top0 and top0.get('combined_score', 0.0) >= BUY_THRESHOLD:
+        if top0 and float(top0.get('combined_score', 0.0)) >= BUY_THRESHOLD:
             title = f"🔥 New BUY top pick: {top0['symbol']}"
-            body = f"Score {round(top0['combined_score'],4)} | Price {top0['last_price']}"
+            body = f"Score {round(float(top0['combined_score']),4)} | Price {top0['last_price']}"
             log_notification("buy", top0['symbol'], title, body)
             if FCM_TEST_TOKEN:
                 send_push(to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": top0['symbol']})
@@ -218,9 +218,9 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
     # notify other notable picks >= ALERT_THRESHOLD
     try:
         for p in picks:
-            if p.get('combined_score', 0.0) >= ALERT_THRESHOLD:
+            if float(p.get('combined_score', 0.0)) >= ALERT_THRESHOLD:
                 title = f"Interesting pick: {p['symbol']}"
-                body = f"Score {round(p['combined_score'],4)} | Price {p['last_price']}"
+                body = f"Score {round(float(p['combined_score']),4)} | Price {p['last_price']}"
                 log_notification("alert", p['symbol'], title, body)
                 if FCM_TEST_TOKEN:
                     send_push(to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": p['symbol']})
@@ -233,13 +233,12 @@ async def run_top_picks_once(limit=TOP_N):
     """
     Top-level async entry used by routes and scheduler wrapper.
     """
-    from scheduler import load_universe  # local import to avoid circulars in some setups
     universe = load_universe()
     if not universe:
         print("⚠️ No universe available for top picks")
         return None
 
-    # cap to reasonable number for scheduled runs, but pass full universe to engine
+    # cap to reasonable number for scheduled runs
     universe = universe[: max(len(universe), TOP_N)]
     print(f"🚀 Running Top Picks for {len(universe)} stocks...")
     picks = await generate_and_store_top_picks(universe, limit)
@@ -257,8 +256,8 @@ def start_scheduler():
         print("⚠️ Scheduler already running.")
         return
     scheduler.add_job(run_top_picks_async_wrapper, 'interval', minutes=TOPPICKS_INTERVAL_MIN)
-    # position monitor job kept as-is
-    scheduler.add_job(lambda: None, 'interval', minutes=MONITOR_INTERVAL_MIN)  # placeholder (monitoring implemented elsewhere)
+    # Note: position monitoring implemented elsewhere; keep placeholder or add real monitor
+    scheduler.add_job(lambda: None, 'interval', minutes=MONITOR_INTERVAL_MIN)
     scheduler.start()
     print("✅ Scheduler started.")
 
