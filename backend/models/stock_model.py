@@ -23,12 +23,12 @@ import joblib
 import xgboost as xgb
 
 # import utils (adjust path if needed)
-from backend.utils.market import fetch_intraday, compute_features
-from backend.utils.score import score_from_features
-from backend.utils.buy_confidence_utils import compute_buy_confidence
-from backend.utils.atr_utils import compute_atr, compute_volatility_regime
-from backend.utils.candle_utils import get_candle_features
-from backend.utils.swing_utils import compute_trend_structure
+from utils.market import fetch_intraday, compute_features
+from utils.score import score_from_features
+from utils.buy_confidence_utils import compute_buy_confidence
+from utils.atr_utils import compute_atr, compute_volatility_regime
+from utils.candle_utils import get_candle_features
+from utils.swing_utils import compute_trend_structure
 
 # ---------------------------
 # Configuration / Defaults
