@@ -3,6 +3,7 @@ import os
 import math
 import sqlite3
 import asyncio
+import logging
 from datetime import datetime as dt
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 
@@ -15,12 +16,19 @@ from google.auth.exceptions import DefaultCredentialsError
 
 from models.stock_model import get_default_engine
 
+# config
 ROUTE_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
 SYMBOL_TIMEOUT_SEC = float(os.getenv("SYMBOL_TIMEOUT_SEC", "10.0"))
 MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "50"))
 DEFAULT_LIMIT = int(os.getenv("TOP_N", "10"))
 
 router = APIRouter()
+logger = logging.getLogger("routes.picks")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(ch)
 
 try:
     DB_FIRESTORE = firestore.client()
@@ -44,7 +52,6 @@ def clean_for_json(obj):
     return obj
 
 _engine_singleton = None
-
 def get_engine(verbose: bool = False):
     global _engine_singleton
     if _engine_singleton is None:
@@ -53,26 +60,16 @@ def get_engine(verbose: bool = False):
 
 async def _analyze_symbol_async(symbol: str, semaphore: asyncio.Semaphore, timeout: float = SYMBOL_TIMEOUT_SEC):
     engine = get_engine()
-    # expecting symbol maybe 'TCS' or 'TCS.NS'
-    sym = str(symbol).strip().upper()
-    fetch_sym = sym if sym.endswith(".NS") else sym + ".NS"
-
-    # combine weights: ml 35% + engine 65%
-    combine_weights = {"ml": 0.35, "engine": 0.65}
-
+    # ensure symbol includes .NS for fetch step in engine if it needs to fetch
+    sym_for_fetch = symbol if symbol.endswith(".NS") else symbol + ".NS"
     async with semaphore:
         try:
+            # call analyze_stock with combine_weights override (ml 0.35, engine 0.65)
+            combine_weights = {"ml": 0.35, "engine": 0.65}
+            # run in thread: we pass the DataFrame by letting engine fetch itself (symbol string)
             loop = asyncio.get_running_loop()
-            # fetch df then call analyze_stock with df and force_symbol
-            from utils.market import fetch_intraday
-            df = await asyncio.to_thread(fetch_intraday, fetch_sym, "1d", "5m")
-            if df is None or df.empty:
-                print(f"⚠️ No data for {sym}")
-                return None
-            # call analyze_stock in threadpool with combine_weights and force_symbol
-            def run():
-                return engine.analyze_stock(df, False, False, combine_weights, False, sym.replace(".NS", ""))
-            result = await asyncio.wait_for(loop.run_in_executor(None, run), timeout=timeout)
+            coro = loop.run_in_executor(None, engine.analyze_stock, symbol, True, False, combine_weights, False, None)
+            result = await asyncio.wait_for(coro, timeout=timeout)
             if not result or not result.get("ok"):
                 return None
             # normalize numeric fields
@@ -81,14 +78,12 @@ async def _analyze_symbol_async(symbol: str, semaphore: asyncio.Semaphore, timeo
             result["engine_score"] = float(result.get("engine_score") or 0.0)
             result["buy_confidence"] = float(result.get("buy_confidence") or 0.0)
             result["last_price"] = float(result.get("last_price") or 0.0)
-            # ensure proper symbol naming
-            result["symbol"] = str(result.get("symbol")).upper().replace(".NS", "")
             return result
         except asyncio.TimeoutError:
-            print(f"⚠️ Timeout analyzing {symbol}")
+            logger.warning(f"⚠️ Timeout analyzing {symbol}")
             return None
         except Exception as e:
-            print(f"❌ Error analyzing {symbol}: {e}")
+            logger.error(f"❌ Error analyzing {symbol}: {e}")
             return None
 
 @router.get("/top-picks")
@@ -106,14 +101,13 @@ async def top_picks(limit: int = DEFAULT_LIMIT, max_symbols: int = MAX_SYMBOLS, 
 
     universe = universe[:max_symbols]
     sem = asyncio.Semaphore(batch_size)
-
     tasks = [_analyze_symbol_async(sym, sem, timeout_sec) for sym in universe]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     valid = []
     for r in results:
         if isinstance(r, Exception):
-            print("Analysis exception:", r)
+            logger.warning("Analysis exception: %s", r)
             continue
         if r and r.get("ok"):
             valid.append(r)
@@ -166,7 +160,7 @@ async def top_picks_cached(limit: int = DEFAULT_LIMIT):
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Failed to read cached top picks: {e}")
 
-# preserved buy/sell/update endpoints unchanged...
+# buy/sell endpoints unchanged (kept minimal)
 @router.post("/buy")
 def buy_stock(payload: dict):
     symbol = payload.get("symbol")
@@ -174,7 +168,7 @@ def buy_stock(payload: dict):
     size = payload.get("size", 1.0)
     target = payload.get("target", 5.0)
     stop = payload.get("stop", 1.5)
-    if not symbol or not price:
+    if not symbol or price is None:
         raise HTTPException(status_code=400, detail="symbol and price required")
     ts = dt.utcnow().isoformat()
     conn = sqlite3.connect("app.db")
@@ -189,7 +183,7 @@ def buy_stock(payload: dict):
 def sell_stock(payload: dict):
     symbol = payload.get("symbol")
     price = payload.get("price")
-    if not symbol or not price:
+    if not symbol or price is None:
         raise HTTPException(status_code=400, detail="symbol and price required")
     ts = dt.utcnow().isoformat()
     conn = sqlite3.connect("app.db")
@@ -197,8 +191,7 @@ def sell_stock(payload: dict):
     c.execute("SELECT entry_price FROM positions WHERE symbol=? AND status='OPEN' ORDER BY id DESC LIMIT 1", (symbol,))
     row = c.fetchone()
     entry_price = row[0] if row else None
-    c.execute("UPDATE positions SET exit_price=?,exit_ts=?,status='CLOSED' WHERE symbol=? AND status='OPEN'",
-              (price, ts, symbol))
+    c.execute("UPDATE positions SET exit_price=?,exit_ts=?,status='CLOSED' WHERE symbol=? AND status='OPEN'", (price, ts, symbol))
     conn.commit()
     conn.close()
     return {"status": "ok", "message": "Position closed"}
