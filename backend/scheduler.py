@@ -14,8 +14,8 @@ from firebase_admin import credentials, firestore
 from datetime import datetime as dt, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from backend.engine.top_picks_engine import generate_top_picks
-from backend.models.stock_model import get_default_engine
+from engine.top_picks_engine import generate_top_picks
+from models.stock_model import get_default_engine
 from utils.positions import open_position, close_position, list_open_positions
 from utils.notifier import send_push
 from utils.market import fetch_intraday, compute_features
