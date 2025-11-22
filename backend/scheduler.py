@@ -113,37 +113,42 @@ def upsert_all_stock(s):
     if not success:
         logger.warning("⚠️ Skipping DB write for %s due to locked DB", s.get('symbol'))
 
-def load_universe(csv_path=os.path.join("backend", "tickers.csv")):
+def load_universe(csv_path=os.path.join("backend", "universe_final_with_liquidity.csv")):
     """
-    Prefer market-cap / liquidity based universe.
-    Current fallback: tickers.csv (first N lines).
+    Loads and sorts stocks by Liquidity DESCENDING.
+    CSV columns: Symbol,Liquidity
+    Returns list of symbols with .NS appended.
     """
-    try:
-        from nsetools import Nse
-        nse = Nse()
-        logger.info("🌐 Fetching live NSE symbols via nsetools...")
-        all_stock_codes = nse.get_stock_codes()
-        universe = []
-        if isinstance(all_stock_codes, dict):
-            universe = [sym + ".NS" for sym in all_stock_codes.keys() if sym != 'SYMBOL']
-        elif isinstance(all_stock_codes, list):
-            universe = [sym + ".NS" for sym in all_stock_codes if sym != 'SYMBOL']
-        if universe:
-            universe = universe[:200]
-            logger.info("✅ %s symbols loaded for top picks", len(universe))
-            return universe
-        else:
-            raise ValueError("No symbols returned from nsetools")
-    except Exception as e:
-        logger.warning("⚠️ Failed fetching live NSE symbols: %s", e)
-        if not os.path.exists(csv_path):
-            logger.warning("⚠️ tickers.csv missing at %s", csv_path)
-            return []
-        with open(csv_path) as f:
-            universe = [line.strip() for line in f if line.strip()]
-        universe = universe[:200]
-        logger.info("✅ Using %s symbols from local CSV fallback", len(universe))
-        return universe
+    if not os.path.exists(csv_path):
+        print(f"❌ Universe CSV not found at: {csv_path}")
+        return []
+
+    rows = []
+    with open(csv_path, "r") as f:
+        next(f)  # skip header
+        for line in f:
+            parts = line.strip().split(",")
+            if len(parts) < 2:
+                continue
+
+            sym = parts[0].strip()
+            try:
+                liquidity = float(parts[1])
+            except:
+                continue
+
+            if sym:
+                rows.append((sym, liquidity))
+
+    # ✅ Sort by liquidity (highest first)
+    rows.sort(key=lambda x: x[1], reverse=True)
+
+    # return ONLY the symbols with .NS
+    symbols = [r[0] + ".NS" for r in rows]
+
+    print(f"✅ Loaded {len(symbols)} symbols (sorted by liquidity)")
+    return symbols
+
 
 # ----------------------- SAVE + NOTIFY -----------------------
 def save_top_picks_to_firestore(picks, top_n=TOP_N):
@@ -245,7 +250,8 @@ async def run_top_picks_once(limit=TOP_N):
         logger.warning("⚠️ No universe available for top picks")
         return None
 
-    universe = universe[: max(len(universe), TOP_N)]
+    universe = universe[:70]
+
     logger.info(f"🚀 Running Top Picks for {len(universe)} stocks...")
     picks = await generate_and_store_top_picks(universe, limit)
     logger.info("✅ Top picks generation completed.")
