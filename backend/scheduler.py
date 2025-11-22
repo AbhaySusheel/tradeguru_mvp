@@ -113,7 +113,7 @@ def upsert_all_stock(s):
     if not success:
         logger.warning("⚠️ Skipping DB write for %s due to locked DB", s.get('symbol'))
 
-def load_universe(csv_path=os.path.join(os.path.dirname(__file__), "universe_final_with_liquidity.csv")):
+def load_universe(csv_path = "universe_final_with_liquidity.csv"):
     """
     Loads and sorts stocks by Liquidity DESCENDING.
     CSV columns: Symbol,Liquidity
