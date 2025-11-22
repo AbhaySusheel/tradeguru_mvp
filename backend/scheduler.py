@@ -3,7 +3,7 @@
 TradeGuru Async Scheduler - Full Update
 Includes:
 - DB migration on startup
-- Smart profit notifications (predicted_max milestones)
+- Smart profit notifications (progress + near-max)
 - Dynamic stop-loss (soft/hard)
 - Market hours guard (NSE)
 - Top picks generation and notifications
@@ -23,8 +23,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from engine.top_picks_engine import generate_top_picks
 from models.stock_model import get_default_engine
 from utils.notifier import send_push
-
-from backend.db_migration import add_missing_columns  # <--- import migration
+from db_migration import add_missing_columns  # migration helper
 
 logger = logging.getLogger("scheduler")
 logger.setLevel(logging.INFO)
@@ -40,7 +39,6 @@ TOPPICKS_INTERVAL_MIN = int(os.getenv("TOPPICKS_INTERVAL_MIN", "15"))
 MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "2"))
 FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.70"))
-ALERT_THRESHOLD = float(os.getenv("ALERT_THRESHOLD", "0.60"))
 
 # ----------------------- FIREBASE INIT -----------------------
 if not firebase_admin._apps:
@@ -109,7 +107,7 @@ def market_open_now():
 
 # ----------------------- SMART MONITOR -----------------------
 async def monitor_positions():
-    """Smart notifications: approaching predicted max and dynamic stop-loss."""
+    """Smart notifications: progress + near-max profit and dynamic stop-loss."""
     if not market_open_now():
         logger.info("⚠️ Market closed, skipping monitoring")
         return
@@ -137,7 +135,15 @@ async def monitor_positions():
 
         # -------- PROFIT MILESTONES --------
         if predicted_max and predicted_max > entry_price:
-            milestones = [(0.95, "Almost there!"), (0.97, "Getting close!"), (0.985, "Near maximum!")]
+            # progress + near-max milestones
+            milestones = [
+                (0.25, "Stock is rising!"),
+                (0.50, "Stock is rising steadily!"),
+                (0.75, "Stock is rising — almost halfway to max!"),
+                (0.95, "Almost there!"),
+                (0.97, "Getting close!"),
+                (0.985, "Near maximum!")
+            ]
             sent = set(profit_alerts_sent.split(',')) if profit_alerts_sent else set()
             for pct, note in milestones:
                 milestone_price = entry_price + (predicted_max - entry_price) * pct
@@ -150,6 +156,7 @@ async def monitor_positions():
                         send_push(to_token=FCM_TEST_TOKEN, title=title, body=body,
                                   data={"symbol": symbol, "type": "profit-milestone"})
                     sent.add(key)
+            # update DB
             conn = db_conn()
             c = conn.cursor()
             c.execute("UPDATE positions SET profit_alerts_sent=? WHERE symbol=?", (','.join(sent), symbol))
@@ -221,7 +228,7 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
         p['intraday_pct'] = float(p.get('features', {}).get('core', {}).get('intraday_pct', 0.0)) \
             if isinstance(p.get('features', {}), dict) else 0.0
     save_top_picks_to_firestore(picks, top_n=limit)
-    # Top pick notification
+
     try:
         top0 = picks[0] if picks else None
         if top0 and top0.get('combined_score', 0.0) >= BUY_THRESHOLD:
@@ -240,9 +247,8 @@ async def run_top_picks_once(limit=TOP_N):
         return
     universe = universe[:70]
     logger.info(f"🚀 Running Top Picks for {len(universe)} stocks...")
-    picks = await generate_and_store_top_picks(universe, limit)
+    await generate_and_store_top_picks(universe, limit)
     logger.info("✅ Top picks generation completed.")
-    return picks
 
 def run_top_picks_async_wrapper():
     try:
@@ -252,8 +258,7 @@ def run_top_picks_async_wrapper():
 
 # ----------------------- SCHEDULER -----------------------
 def start_scheduler():
-    # Run DB migration first
-    add_missing_columns()
+    add_missing_columns()  # migrate DB on startup
     if scheduler.running:
         logger.warning("⚠️ Scheduler already running.")
         return
