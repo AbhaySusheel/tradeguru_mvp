@@ -245,7 +245,7 @@ async def run_top_picks_once(limit=TOP_N):
     if not universe:
         logger.warning("⚠️ No universe available for top picks")
         return
-    universe = universe[:70]
+    universe = universe[:200]
     logger.info(f"🚀 Running Top Picks for {len(universe)} stocks...")
     await generate_and_store_top_picks(universe, limit)
     logger.info("✅ Top picks generation completed.")
