@@ -92,6 +92,15 @@ def init_db():
     )
     """)
 
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS push_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token TEXT UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+
     conn.commit()
     conn.close()
     print("✅ Database initialized successfully.")
