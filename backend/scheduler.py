@@ -19,7 +19,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime as dt, timedelta, time as dttime
 from apscheduler.schedulers.background import BackgroundScheduler
-from db_init import db_conn  # your existing DB helper
+
 from routes.register_push_token import get_all_tokens  # helper to fetch all saved Expo tokens
 from utils.notifier import send_push_async  # async push version
 
