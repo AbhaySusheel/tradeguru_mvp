@@ -19,10 +19,12 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime as dt, timedelta, time as dttime
 from apscheduler.schedulers.background import BackgroundScheduler
+from db_init import db_conn  # your existing DB helper
+from routes.register_push_token import get_all_tokens  # helper to fetch all saved Expo tokens
+from utils.notifier import send_push_async  # async push version
 
 from engine.top_picks_engine import generate_top_picks
 from models.stock_model import get_default_engine
-from utils.notifier import send_push
 from db_migration import add_missing_columns  # migration helper
 
 logger = logging.getLogger("scheduler")
@@ -133,9 +135,10 @@ async def monitor_positions():
             logger.warning(f"Failed to fetch price for {symbol}: {e}")
             continue
 
+        tasks = []
+
         # -------- PROFIT MILESTONES --------
         if predicted_max and predicted_max > entry_price:
-            # progress + near-max milestones
             milestones = [
                 (0.25, "Stock is rising!"),
                 (0.50, "Stock is rising steadily!"),
@@ -153,10 +156,13 @@ async def monitor_positions():
                     body = f"Entry:{entry_price}, Current:{round(last_price, 2)}, {note} ({round(milestone_price, 2)})"
                     log_notification("profit-milestone", symbol, title, body)
                     if FCM_TEST_TOKEN:
-                        send_push(to_token=FCM_TEST_TOKEN, title=title, body=body,
-                                  data={"symbol": symbol, "type": "profit-milestone"})
+                        tasks.append(send_push_async(
+                            to_token=FCM_TEST_TOKEN,
+                            title=title,
+                            body=body,
+                            data={"symbol": symbol, "type": "profit-milestone"}
+                        ))
                     sent.add(key)
-            # update DB
             conn = db_conn()
             c = conn.cursor()
             c.execute("UPDATE positions SET profit_alerts_sent=? WHERE symbol=?", (','.join(sent), symbol))
@@ -173,22 +179,35 @@ async def monitor_positions():
             body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Soft stop:{round(soft_stop_price,2)}"
             log_notification("stop-loss-soft", symbol, title, body)
             if FCM_TEST_TOKEN:
-                send_push(to_token=FCM_TEST_TOKEN, title=title, body=body,
-                          data={"symbol": symbol, "type": "stop-loss-soft"})
+                tasks.append(send_push_async(
+                    to_token=FCM_TEST_TOKEN,
+                    title=title,
+                    body=body,
+                    data={"symbol": symbol, "type": "stop-loss-soft"}
+                ))
             stop_sent.add("soft")
+
         if last_price <= hard_stop_price and "hard" not in stop_sent:
             title = f"❌ {symbol} hit stop-loss!"
             body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Hard stop:{round(hard_stop_price,2)}"
             log_notification("stop-loss-hard", symbol, title, body)
             if FCM_TEST_TOKEN:
-                send_push(to_token=FCM_TEST_TOKEN, title=title, body=body,
-                          data={"symbol": symbol, "type": "stop-loss-hard"})
+                tasks.append(send_push_async(
+                    to_token=FCM_TEST_TOKEN,
+                    title=title,
+                    body=body,
+                    data={"symbol": symbol, "type": "stop-loss-hard"}
+                ))
             stop_sent.add("hard")
+
         conn = db_conn()
         c = conn.cursor()
         c.execute("UPDATE positions SET stop_alerts_sent=? WHERE symbol=?", (','.join(stop_sent), symbol))
         conn.commit()
         conn.close()
+
+        if tasks:
+            await asyncio.gather(*tasks)
 
 # ----------------------- SAVE + NOTIFY -----------------------
 def save_top_picks_to_firestore(picks, top_n=TOP_N):
@@ -236,9 +255,35 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
             body = f"Score {round(top0['combined_score'], 4)} | Price {top0['last_price']}"
             log_notification("buy", top0['symbol'], title, body)
             if FCM_TEST_TOKEN:
-                send_push(to_token=FCM_TEST_TOKEN, title=title, body=body, data={"symbol": top0['symbol']})
+                await send_push_async(
+                    to_token=FCM_TEST_TOKEN,
+                    title=title,
+                    body=body,
+                    data={"symbol": top0['symbol'], "type": "top-pick"}
+                )
+            await notify_all_users_about_top_pick(top0)
     except Exception as e:
         logger.error("Notification error: %s", e)
+
+async def notify_all_users_about_top_pick(top_pick):
+    if not top_pick:
+        return
+
+    tokens = get_all_tokens()
+    if not tokens:
+        return
+
+    title = f"🔥 New BUY top pick: {top_pick['symbol']}"
+    body = f"Score {round(top_pick.get('score',0), 4)} | Price {top_pick.get('last_price',0)}"
+
+    await asyncio.gather(*[
+        send_push_async(
+            to_token=token,
+            title=title,
+            body=body,
+            data={"symbol": top_pick['symbol'], "type": "top-pick"}
+        ) for token in tokens
+    ])
 
 async def run_top_picks_once(limit=TOP_N):
     universe = load_universe()
@@ -258,12 +303,12 @@ def run_top_picks_async_wrapper():
 
 # ----------------------- SCHEDULER -----------------------
 def start_scheduler():
-    add_missing_columns()  # migrate DB on startup
+    add_missing_columns()
     if scheduler.running:
         logger.warning("⚠️ Scheduler already running.")
         return
-    scheduler.add_job(run_top_picks_async_wrapper, 'interval', minutes=TOPPICKS_INTERVAL_MIN)
-    scheduler.add_job(lambda: asyncio.run(monitor_positions()), 'interval', minutes=MONITOR_INTERVAL_MIN)
+    scheduler.add_job(lambda: asyncio.create_task(monitor_positions()), 'interval', minutes=MONITOR_INTERVAL_MIN)
+    scheduler.add_job(lambda: asyncio.create_task(run_top_picks_once()), 'interval', minutes=TOPPICKS_INTERVAL_MIN)
     scheduler.start()
     logger.info("✅ Scheduler started.")
 

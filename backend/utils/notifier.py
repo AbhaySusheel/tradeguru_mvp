@@ -1,5 +1,6 @@
 import os
 import firebase_admin
+import asyncio
 from firebase_admin import credentials, messaging
 
 # Initialize Firebase app only once
@@ -21,21 +22,23 @@ if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
         print(f"✅ Firebase initialized using: {cred_path}")
 
-def send_push(to_token: str, title: str, body: str, data: dict = None):
-    """Send a push notification via Firebase Cloud Messaging (FCM)."""
-    if not firebase_admin._apps:
-        print("⚠️ Firebase not initialized — skipping push.")
-        return False
+async def send_push_async(to_token: str, title: str, body: str, data: dict = None):
+    """Send push notification in an async thread."""
+    def _send():
+        if not firebase_admin._apps:
+            print("⚠️ Firebase not initialized — skipping push.")
+            return False
+        try:
+            message = messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                data={str(k): str(v) for k, v in (data or {}).items()},
+                token=to_token
+            )
+            response = messaging.send(message)
+            print(f"✅ Push sent successfully: {response}")
+            return True
+        except Exception as e:
+            print(f"❌ Push failed: {e}")
+            return False
 
-    try:
-        message = messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
-            data={str(k): str(v) for k, v in (data or {}).items()},
-            token=to_token
-        )
-        response = messaging.send(message)
-        print(f"✅ Push sent successfully: {response}")
-        return True
-    except Exception as e:
-        print(f"❌ Push failed: {e}")
-        return False
+    return await asyncio.to_thread(_send)
