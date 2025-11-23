@@ -301,14 +301,20 @@ def run_top_picks_async_wrapper():
     except Exception as e:
         logger.error("❌ Error running scheduled top picks job: %s", e)
 
+
+def monitor_positions_sync():
+    asyncio.run(monitor_positions())
+
+def run_top_picks_once_sync():
+    asyncio.run(run_top_picks_once())
 # ----------------------- SCHEDULER -----------------------
 def start_scheduler():
     add_missing_columns()
     if scheduler.running:
         logger.warning("⚠️ Scheduler already running.")
         return
-    scheduler.add_job(lambda: asyncio.create_task(monitor_positions()), 'interval', minutes=MONITOR_INTERVAL_MIN)
-    scheduler.add_job(lambda: asyncio.create_task(run_top_picks_once()), 'interval', minutes=TOPPICKS_INTERVAL_MIN)
+    scheduler.add_job(monitor_positions_sync, 'interval', minutes=MONITOR_INTERVAL_MIN)
+    scheduler.add_job(run_top_picks_once_sync, 'interval', minutes=TOPPICKS_INTERVAL_MIN)
     scheduler.start()
     logger.info("✅ Scheduler started.")
 
