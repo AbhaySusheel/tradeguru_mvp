@@ -42,3 +42,7 @@ async def send_push_async(to_token: str, title: str, body: str, data: dict = Non
             return False
 
     return await asyncio.to_thread(_send)
+
+
+def send_push(to_token, title, body, data=None):
+    asyncio.run(send_push_async(to_token, title, body, data))    
