@@ -196,6 +196,32 @@ def sell_stock(payload: dict):
     conn.close()
     return {"status": "ok", "message": "Position closed"}
 
+from pydantic import BaseModel
+
+class PushTokenBody(BaseModel):
+    token: str
+
+@router.post("/registerPushToken")
+async def register_push_token(payload: PushTokenBody):
+    if DB_FIRESTORE is None:
+        raise HTTPException(status_code=503, detail="Firestore client not initialized")
+
+    try:
+        # Save token as a document, ID = token string
+        doc_ref = DB_FIRESTORE.collection("push_tokens").document(payload.token)
+        await asyncio.to_thread(
+            doc_ref.set,
+            {
+                "token": payload.token,
+                "created_at": dt.utcnow().isoformat(),
+            }
+        )
+
+        return {"status": "ok", "saved": True}
+    except Exception as e:
+        logger.error(f"❌ Failed to save push token: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save token")
+
 @router.get("/update-top-picks")
 async def update_top_picks(token: str, background_tasks: BackgroundTasks):
     CRON_SECRET = os.getenv("CRON_SECRET", "my_secret_token")
