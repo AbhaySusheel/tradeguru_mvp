@@ -1,29 +1,38 @@
 {
   "expo": {
     "name": "tradeguru_app",
-    "slug": "tradeguru_app",
+    "slug": "tradeguru",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "icon": "./assets/images/icon.png",
+    "scheme": "tradeguruapp",
+    "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#FFFFFF",
+        "foregroundImage": "./assets/images/android-icon-foreground.png"
+      },
+      "googleServicesFile": "./android/app/google-services.json",
+      "useNextNotificationsApi": true,
+      "package": "com.tradeguru.app"
     },
+
     "ios": {
       "supportsTablet": true
     },
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
-      },
-      "edgeToEdgeEnabled": true
-    },
+
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/images/favicon.png"
+    },
+
+    "extra": {
+      "apiBaseUrl": "https://tradeguru-mvp.onrender.com",
+      "apiKey": "8f912050f8a403046ea774190bf4fa33",
+      "eas": {
+        "projectId": "008ed7e9-8576-4d13-976a-afbbca91861a"
+      }
     }
   }
 }
