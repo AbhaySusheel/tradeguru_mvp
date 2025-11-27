@@ -14,7 +14,7 @@
         "backgroundColor": "#FFFFFF",
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
-      "googleServicesFile": "./android/app/google-services.json",
+      "googleServicesFile": "GOOGLE_SERVICES_JSON",
       "useNextNotificationsApi": true,
       "package": "com.tradeguru.app"
     },
