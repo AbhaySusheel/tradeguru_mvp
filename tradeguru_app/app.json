@@ -15,7 +15,7 @@
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
       "googleServicesFile": "GOOGLE_SERVICES_JSON",
-      "useNextNotificationsApi": true,
+      
       "package": "com.tradeguru.app"
     },
 
