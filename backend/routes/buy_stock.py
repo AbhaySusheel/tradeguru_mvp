@@ -11,7 +11,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from datetime import datetime as dt
 
-from scheduler import monitor_positions_sync, db_conn, try_db_write
+from scheduler import db_conn, try_db_write
 
 router = APIRouter()
 logger = logging.getLogger("buy_stock")
@@ -20,7 +20,6 @@ if not logger.handlers:
     ch = logging.StreamHandler()
     ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(ch)
-
 
 # Default stop-loss percentages
 DEFAULT_SOFT_STOP = 3.0   # 3%
@@ -47,6 +46,7 @@ async def buy_stock(request: Request):
     symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
     ts_val = dt.utcnow().isoformat()
 
+    # Insert into DB
     def insert_position():
         conn = db_conn()
         c = conn.cursor()
@@ -77,7 +77,11 @@ async def buy_stock(request: Request):
 
     logger.info(f"✅ Added new position: {symbol_ns} @ {entry_price}")
 
-    # Trigger immediate monitoring (async)
-    asyncio.create_task(monitor_positions_sync())
+    # Trigger immediate monitoring for this stock safely
+    async def monitor_new_position():
+        from scheduler import monitor_position
+        await monitor_position((symbol_ns, entry_price, predicted_max, "OPEN", DEFAULT_SOFT_STOP, DEFAULT_HARD_STOP, "", ""))
+
+    asyncio.create_task(monitor_new_position())
 
     return {"ok": True, "symbol": symbol_ns, "entry_price": entry_price, "status": "OPEN"}
