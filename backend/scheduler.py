@@ -15,8 +15,8 @@ import sqlite3
 import asyncio
 import json
 import logging
-import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import firestore
+
 from datetime import datetime as dt, timedelta, time as dttime
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -43,18 +43,6 @@ FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.70"))
 
 # ----------------------- FIREBASE INIT -----------------------
-if not firebase_admin._apps:
-    json_creds = os.getenv("FIREBASE_CREDENTIALS_JSON")
-    try:
-        if json_creds:
-            cred = credentials.Certificate(json.loads(json_creds))
-            firebase_admin.initialize_app(cred)
-        else:
-            cred = credentials.Certificate("firebase_key.json")
-            firebase_admin.initialize_app(cred)
-        logger.info("✅ Firebase initialized")
-    except Exception as e:
-        logger.error("❌ Firebase init failed: %s", e)
 
 db_firestore = firestore.client()
 
@@ -116,13 +104,20 @@ async def monitor_positions():
 
     conn = db_conn()
     c = conn.cursor()
-    c.execute("""SELECT symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent
-                 FROM positions WHERE status='OPEN'""")
+    c.execute("""SELECT symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, 
+                        profit_alerts_sent, stop_alerts_sent
+                 FROM positions""")  # fetch all
     positions = c.fetchall()
     conn.close()
 
+    tasks = []
+
     for pos in positions:
         symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent = pos
+        if status != "OPEN":
+            logger.info(f"ℹ️ Skipping {symbol}, status={status}")
+            continue  # skip sold/closed
+
         symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
 
         try:
@@ -134,8 +129,6 @@ async def monitor_positions():
         except Exception as e:
             logger.warning(f"Failed to fetch price for {symbol}: {e}")
             continue
-
-        tasks = []
 
         # -------- PROFIT MILESTONES --------
         if predicted_max and predicted_max > entry_price:
@@ -206,8 +199,8 @@ async def monitor_positions():
         conn.commit()
         conn.close()
 
-        if tasks:
-            await asyncio.gather(*tasks)
+    if tasks:
+        await asyncio.gather(*tasks)
 
 # ----------------------- SAVE + NOTIFY -----------------------
 def save_top_picks_to_firestore(picks, top_n=TOP_N):

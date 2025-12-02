@@ -13,6 +13,11 @@ from routes.stocks import router as stocks_router
 from routes.picks import router as picks_router
 from routes.positions import router as positions_router
 from routes.register_push_token import router as push_token_router
+from routes.buy_stock import router as buy_stock_router
+from routes.sell_stock import router as sell_stock_router
+
+
+
 
 API_KEY = os.getenv("API_KEY")
 
@@ -56,6 +61,8 @@ app.include_router(stocks_router, prefix="/api")
 app.include_router(picks_router, prefix="/api")
 app.include_router(positions_router, prefix="/api")
 app.include_router(push_token_router, prefix="/api")
+app.include_router(buy_stock_router, prefix="/api") 
+app.include_router(sell_stock_router, prefix="/api")
 
 @app.get("/")
 def root():
