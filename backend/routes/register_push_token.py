@@ -58,3 +58,11 @@ def get_all_tokens():
     conn.close()
     return tokens
 
+@router.get("/debug_tokens")
+def debug_tokens():
+    conn = db_conn()
+    c = conn.cursor()
+    rows = c.execute("SELECT * FROM push_tokens").fetchall()
+    conn.close()
+    return {"tokens": rows}
+
