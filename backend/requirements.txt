@@ -4,6 +4,7 @@ pytz
 httpx
 pandas
 numpy
+aiohttp
 yfinance
 python-dotenv
 sqlalchemy
