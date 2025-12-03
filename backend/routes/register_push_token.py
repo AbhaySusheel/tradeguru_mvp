@@ -46,6 +46,10 @@ async def register_push_token(payload: PushToken):
         print("Error registering push token:", e)
         raise HTTPException(status_code=500, detail="Failed to register token")
 
+def db_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+
 def get_all_tokens():
     conn = db_conn()
     c = conn.cursor()

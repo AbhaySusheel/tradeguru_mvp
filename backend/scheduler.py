@@ -96,8 +96,118 @@ def market_open_now():
     return dttime(9, 15) <= now.time() <= dttime(15, 30)
 
 # ----------------------- SMART MONITOR -----------------------
+# Inside scheduler.py
+# ----------------------- SMART MONITOR -----------------------
+async def monitor_position(pos):
+    """
+    Monitors a single position for profit milestones and stop-loss.
+    pos: tuple from DB (symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent)
+    """
+    symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent = pos
+    if status != "OPEN":
+        return  # skip closed
+
+    symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
+
+    try:
+        engine = get_default_engine()
+        stock_data = engine.get_last_price(symbol_ns)
+        if not stock_data:
+            return
+        last_price = float(stock_data.get("last_price", 0))
+    except Exception as e:
+        logger.warning(f"Failed to fetch price for {symbol}: {e}")
+        return
+
+    tasks = []
+
+    # -------- PROFIT MILESTONES --------
+    if predicted_max and predicted_max > entry_price:
+        milestones = [
+            (0.25, "Stock is rising!"),
+            (0.50, "Stock is rising steadily!"),
+            (0.75, "Stock is rising — almost halfway to max!"),
+            (0.95, "Almost there!"),
+            (0.97, "Getting close!"),
+            (0.985, "Near maximum!")
+        ]
+        sent = set(profit_alerts_sent.split(',')) if profit_alerts_sent else set()
+        for pct, note in milestones:
+            milestone_price = entry_price + (predicted_max - entry_price) * pct
+            key = str(round(milestone_price, 2))
+            if last_price >= milestone_price and key not in sent:
+                title = f"📈 {symbol} is rising!"
+                body = f"Entry:{entry_price}, Current:{round(last_price,2)}, {note} ({round(milestone_price,2)})"
+                log_notification("profit-milestone", symbol, title, body)
+
+                # ✅ Send to all registered tokens
+                tokens = get_all_tokens()
+                tasks.extend([
+                    send_push_async(
+                        to_token=token,
+                        title=title,
+                        body=body,
+                        data={"symbol": symbol, "type": "profit-milestone"}
+                    ) for token in tokens
+                ])
+
+                sent.add(key)
+
+        conn = db_conn()
+        c = conn.cursor()
+        c.execute("UPDATE positions SET profit_alerts_sent=? WHERE symbol=?", (','.join(sent), symbol))
+        conn.commit()
+        conn.close()
+
+    # -------- STOP-LOSS --------
+    stop_sent = set(stop_alerts_sent.split(',')) if stop_alerts_sent else set()
+    soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+    hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
+
+    if last_price <= soft_stop_price and "soft" not in stop_sent:
+        title = f"⚠️ {symbol} dropped, monitor closely!"
+        body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Soft stop:{round(soft_stop_price,2)}"
+        log_notification("stop-loss-soft", symbol, title, body)
+
+        tokens = get_all_tokens()
+        tasks.extend([
+            send_push_async(
+                to_token=token,
+                title=title,
+                body=body,
+                data={"symbol": symbol, "type": "stop-loss-soft"}
+            ) for token in tokens
+        ])
+        stop_sent.add("soft")
+
+    if last_price <= hard_stop_price and "hard" not in stop_sent:
+        title = f"❌ {symbol} hit stop-loss!"
+        body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Hard stop:{round(hard_stop_price,2)}"
+        log_notification("stop-loss-hard", symbol, title, body)
+
+        tokens = get_all_tokens()
+        tasks.extend([
+            send_push_async(
+                to_token=token,
+                title=title,
+                body=body,
+                data={"symbol": symbol, "type": "stop-loss-hard"}
+            ) for token in tokens
+        ])
+        stop_sent.add("hard")
+
+    conn = db_conn()
+    c = conn.cursor()
+    c.execute("UPDATE positions SET stop_alerts_sent=? WHERE symbol=?", (','.join(stop_sent), symbol))
+    conn.commit()
+    conn.close()
+
+    # Run all push tasks asynchronously
+    if tasks:
+        await asyncio.gather(*tasks)
+
+
 async def monitor_positions():
-    """Smart notifications: progress + near-max profit and dynamic stop-loss."""
     if not market_open_now():
         logger.info("⚠️ Market closed, skipping monitoring")
         return
@@ -106,99 +216,11 @@ async def monitor_positions():
     c = conn.cursor()
     c.execute("""SELECT symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, 
                         profit_alerts_sent, stop_alerts_sent
-                 FROM positions""")  # fetch all
+                 FROM positions""")
     positions = c.fetchall()
     conn.close()
 
-    tasks = []
-
-    for pos in positions:
-        symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent = pos
-        if status != "OPEN":
-            logger.info(f"ℹ️ Skipping {symbol}, status={status}")
-            continue  # skip sold/closed
-
-        symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
-
-        try:
-            engine = get_default_engine()
-            stock_data = engine.get_last_price(symbol_ns)
-            if not stock_data:
-                continue
-            last_price = float(stock_data.get("last_price", 0))
-        except Exception as e:
-            logger.warning(f"Failed to fetch price for {symbol}: {e}")
-            continue
-
-        # -------- PROFIT MILESTONES --------
-        if predicted_max and predicted_max > entry_price:
-            milestones = [
-                (0.25, "Stock is rising!"),
-                (0.50, "Stock is rising steadily!"),
-                (0.75, "Stock is rising — almost halfway to max!"),
-                (0.95, "Almost there!"),
-                (0.97, "Getting close!"),
-                (0.985, "Near maximum!")
-            ]
-            sent = set(profit_alerts_sent.split(',')) if profit_alerts_sent else set()
-            for pct, note in milestones:
-                milestone_price = entry_price + (predicted_max - entry_price) * pct
-                key = str(round(milestone_price, 2))
-                if last_price >= milestone_price and key not in sent:
-                    title = f"📈 {symbol} is rising!"
-                    body = f"Entry:{entry_price}, Current:{round(last_price, 2)}, {note} ({round(milestone_price, 2)})"
-                    log_notification("profit-milestone", symbol, title, body)
-                    if FCM_TEST_TOKEN:
-                        tasks.append(send_push_async(
-                            to_token=FCM_TEST_TOKEN,
-                            title=title,
-                            body=body,
-                            data={"symbol": symbol, "type": "profit-milestone"}
-                        ))
-                    sent.add(key)
-            conn = db_conn()
-            c = conn.cursor()
-            c.execute("UPDATE positions SET profit_alerts_sent=? WHERE symbol=?", (','.join(sent), symbol))
-            conn.commit()
-            conn.close()
-
-        # -------- DYNAMIC STOP-LOSS --------
-        stop_sent = set(stop_alerts_sent.split(',')) if stop_alerts_sent else set()
-        soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
-        hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
-
-        if last_price <= soft_stop_price and "soft" not in stop_sent:
-            title = f"⚠️ {symbol} dropped, monitor closely!"
-            body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Soft stop:{round(soft_stop_price,2)}"
-            log_notification("stop-loss-soft", symbol, title, body)
-            if FCM_TEST_TOKEN:
-                tasks.append(send_push_async(
-                    to_token=FCM_TEST_TOKEN,
-                    title=title,
-                    body=body,
-                    data={"symbol": symbol, "type": "stop-loss-soft"}
-                ))
-            stop_sent.add("soft")
-
-        if last_price <= hard_stop_price and "hard" not in stop_sent:
-            title = f"❌ {symbol} hit stop-loss!"
-            body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Hard stop:{round(hard_stop_price,2)}"
-            log_notification("stop-loss-hard", symbol, title, body)
-            if FCM_TEST_TOKEN:
-                tasks.append(send_push_async(
-                    to_token=FCM_TEST_TOKEN,
-                    title=title,
-                    body=body,
-                    data={"symbol": symbol, "type": "stop-loss-hard"}
-                ))
-            stop_sent.add("hard")
-
-        conn = db_conn()
-        c = conn.cursor()
-        c.execute("UPDATE positions SET stop_alerts_sent=? WHERE symbol=?", (','.join(stop_sent), symbol))
-        conn.commit()
-        conn.close()
-
+    tasks = [monitor_position(pos) for pos in positions]
     if tasks:
         await asyncio.gather(*tasks)
 
@@ -230,33 +252,6 @@ def log_notification(type_, symbol, title, body):
 # ----------------------- TOP PICKS -----------------------
 scheduler = BackgroundScheduler()
 
-async def generate_and_store_top_picks(universe, limit=TOP_N):
-    picks = await generate_top_picks(universe, limit)
-    ts_val = dt.utcnow().isoformat()
-    for p in picks:
-        p['ts'] = ts_val
-        p['score'] = float(p.get('combined_score', 0.0))
-        p['last_price'] = float(p.get('last_price', 0.0))
-        p['intraday_pct'] = float(p.get('features', {}).get('core', {}).get('intraday_pct', 0.0)) \
-            if isinstance(p.get('features', {}), dict) else 0.0
-    save_top_picks_to_firestore(picks, top_n=limit)
-
-    try:
-        top0 = picks[0] if picks else None
-        if top0 and top0.get('combined_score', 0.0) >= BUY_THRESHOLD:
-            title = f"🔥 New BUY top pick: {top0['symbol']}"
-            body = f"Score {round(top0['combined_score'], 4)} | Price {top0['last_price']}"
-            log_notification("buy", top0['symbol'], title, body)
-            if FCM_TEST_TOKEN:
-                await send_push_async(
-                    to_token=FCM_TEST_TOKEN,
-                    title=title,
-                    body=body,
-                    data={"symbol": top0['symbol'], "type": "top-pick"}
-                )
-            await notify_all_users_about_top_pick(top0)
-    except Exception as e:
-        logger.error("Notification error: %s", e)
 
 async def notify_all_users_about_top_pick(top_pick):
     if not top_pick:
@@ -277,6 +272,30 @@ async def notify_all_users_about_top_pick(top_pick):
             data={"symbol": top_pick['symbol'], "type": "top-pick"}
         ) for token in tokens
     ])
+
+async def generate_and_store_top_picks(universe, limit=TOP_N):
+    picks = await generate_top_picks(universe, limit)
+    ts_val = dt.utcnow().isoformat()
+    for p in picks:
+        p['ts'] = ts_val
+        p['score'] = float(p.get('combined_score', 0.0))
+        p['last_price'] = float(p.get('last_price', 0.0))
+        p['intraday_pct'] = float(p.get('features', {}).get('core', {}).get('intraday_pct', 0.0)) \
+            if isinstance(p.get('features', {}), dict) else 0.0
+    save_top_picks_to_firestore(picks, top_n=limit)
+
+    try:
+        top0 = picks[0] if picks else None
+        if top0 and top0.get('combined_score', 0.0) >= BUY_THRESHOLD:
+            title = f"🔥 New BUY top pick: {top0['symbol']}"
+            body = f"Score {round(top0['combined_score'], 4)} | Price {top0['last_price']}"
+            log_notification("buy", top0['symbol'], title, body)
+            
+                
+            await notify_all_users_about_top_pick(top0)
+    except Exception as e:
+        logger.error("Notification error: %s", e)
+
 
 async def run_top_picks_once(limit=TOP_N):
     universe = load_universe()

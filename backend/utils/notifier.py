@@ -1,48 +1,31 @@
-import os
-import firebase_admin
+import aiohttp
+import logging
 import asyncio
-from firebase_admin import credentials, messaging
 
-# Initialize Firebase app only once
-if not firebase_admin._apps:
-    # Try environment variable first
-    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+logger = logging.getLogger("notifier")
 
-    # ✅ Fallback to one directory above (../firebase_key.json)
-    if not cred_path:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        cred_path = os.path.join(base_dir, "..", "firebase_key.json")
-
-    cred_path = os.path.normpath(cred_path)
-
-    if not os.path.exists(cred_path):
-        print(f"❌ Firebase key file not found at: {cred_path}")
-    else:
-        cred = credentials.Certificate(cred_path)
-        firebase_admin.initialize_app(cred)
-        print(f"✅ Firebase initialized using: {cred_path}")
+EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 async def send_push_async(to_token: str, title: str, body: str, data: dict = None):
-    """Send push notification in an async thread."""
-    def _send():
-        if not firebase_admin._apps:
-            print("⚠️ Firebase not initialized — skipping push.")
-            return False
-        try:
-            message = messaging.Message(
-                notification=messaging.Notification(title=title, body=body),
-                data={str(k): str(v) for k, v in (data or {}).items()},
-                token=to_token
-            )
-            response = messaging.send(message)
-            print(f"✅ Push sent successfully: {response}")
-            return True
-        except Exception as e:
-            print(f"❌ Push failed: {e}")
-            return False
+    message = {
+        "to": to_token,
+        "sound": "default",
+        "title": title,
+        "body": body,
+        "data": data or {}
+    }
 
-    return await asyncio.to_thread(_send)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(EXPO_PUSH_URL, json=message) as resp:
+                result = await resp.json()
+                logger.info(f"Expo push response: {result}")
+                return result
+
+    except Exception as e:
+        logger.error(f"❌ Push failed: {e}")
+        return None
 
 
 def send_push(to_token, title, body, data=None):
-    asyncio.run(send_push_async(to_token, title, body, data))    
+    asyncio.run(send_push_async(to_token, title, body, data))

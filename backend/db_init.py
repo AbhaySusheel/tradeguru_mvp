@@ -57,20 +57,24 @@ def init_db():
     """)
 
     # positions (OPEN/CLOSED trades)
+    # positions (OPEN/CLOSED trades)
     c.execute("""
     CREATE TABLE IF NOT EXISTS positions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       symbol TEXT,
       entry_price REAL,
-      entry_ts TEXT,
-      size REAL,
+      predicted_max REAL,
       status TEXT,
-      target_pct REAL,
-      stop_pct REAL,
-      exit_price REAL,
-      exit_ts TEXT
+      soft_stop_pct REAL,
+      hard_stop_pct REAL,
+      profit_alerts_sent TEXT,
+      stop_alerts_sent TEXT,
+      sell_price REAL,
+      created_at TEXT,
+      closed_at TEXT
     )
     """)
+
 
     # notifications (push/log messages)
     c.execute("""
