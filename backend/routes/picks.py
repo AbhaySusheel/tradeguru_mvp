@@ -140,4 +140,4 @@ async def get_cached_top_picks():
     except DefaultCredentialsError as e:
         raise HTTPException(status_code=500, detail=f"Firestore auth error: {e}")
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Fai_
+        raise HTTPException(status_code=503, detail=f"Failed to read cached top picks: {e}")
