@@ -1,7 +1,6 @@
 # backend/scheduler.py
 """
-TradeGuru Async Scheduler - Full Update
-Includes:
+TradeGuru Async Scheduler - Final Version
 - DB migration on startup
 - Smart profit notifications (progress + near-max)
 - Dynamic stop-loss (soft/hard)
@@ -13,19 +12,16 @@ import os
 import time
 import sqlite3
 import asyncio
-import json
 import logging
-from firebase_admin import firestore
-
 from datetime import datetime as dt, timedelta, time as dttime
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from routes.register_push_token import get_all_tokens  # helper to fetch all saved Expo tokens
-from utils.notifier import send_push_async  # async push version
+from routes.register_push_token import get_all_tokens  # relative import for your setup
+from utils.notifier import send_push_async
 
 from engine.top_picks_engine import generate_top_picks
 from models.stock_model import get_default_engine
-from db_migration import add_missing_columns  # migration helper
+from db_migration import add_missing_columns
 
 logger = logging.getLogger("scheduler")
 logger.setLevel(logging.INFO)
@@ -39,11 +35,10 @@ DB = os.getenv("DB_PATH", "app.db")
 TOP_N = int(os.getenv("TOP_N", "10"))
 TOPPICKS_INTERVAL_MIN = int(os.getenv("TOPPICKS_INTERVAL_MIN", "15"))
 MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "2"))
-FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
 BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.70"))
 
-# ----------------------- FIREBASE INIT -----------------------
-
+# ----------------------- FIRESTORE INIT -----------------------
+from firebase_admin import firestore
 db_firestore = firestore.client()
 
 # ----------------------- DB HELPERS -----------------------
@@ -87,7 +82,7 @@ def load_universe(csv_path="universe_final_with_liquidity.csv"):
     logger.info(f"✅ Loaded {len(symbols)} symbols")
     return symbols
 
-# ----------------------- MARKET HOURS CHECK -----------------------
+# ----------------------- MARKET HOURS -----------------------
 def market_open_now():
     """NSE market hours: Mon-Fri 09:15 - 15:30 IST"""
     now = dt.utcnow() + timedelta(hours=5, minutes=30)
@@ -95,17 +90,26 @@ def market_open_now():
         return False
     return dttime(9, 15) <= now.time() <= dttime(15, 30)
 
-# ----------------------- SMART MONITOR -----------------------
-# Inside scheduler.py
+# ----------------------- NOTIFICATIONS -----------------------
+def log_notification(type_, symbol, title, body):
+    def _write():
+        conn = db_conn()
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS notifications(
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     ts TEXT, type TEXT, symbol TEXT, note TEXT)""")
+        ts_val = dt.utcnow().isoformat()
+        c.execute("INSERT INTO notifications(ts,type,symbol,note) VALUES(?,?,?,?)",
+                  (ts_val, type_, symbol, title + " - " + body))
+        conn.commit()
+        conn.close()
+    try_db_write(_write)
+
 # ----------------------- SMART MONITOR -----------------------
 async def monitor_position(pos):
-    """
-    Monitors a single position for profit milestones and stop-loss.
-    pos: tuple from DB (symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent)
-    """
     symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent = pos
     if status != "OPEN":
-        return  # skip closed
+        return
 
     symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
 
@@ -139,20 +143,13 @@ async def monitor_position(pos):
                 title = f"📈 {symbol} is rising!"
                 body = f"Entry:{entry_price}, Current:{round(last_price,2)}, {note} ({round(milestone_price,2)})"
                 log_notification("profit-milestone", symbol, title, body)
-
-                # ✅ Send to all registered tokens
                 tokens = get_all_tokens()
                 tasks.extend([
-                    send_push_async(
-                        to_token=token,
-                        title=title,
-                        body=body,
-                        data={"symbol": symbol, "type": "profit-milestone"}
-                    ) for token in tokens
+                    send_push_async(to_token=token, title=title, body=body,
+                                    data={"symbol": symbol, "type": "profit-milestone"})
+                    for token in tokens
                 ])
-
                 sent.add(key)
-
         conn = db_conn()
         c = conn.cursor()
         c.execute("UPDATE positions SET profit_alerts_sent=? WHERE symbol=?", (','.join(sent), symbol))
@@ -168,15 +165,11 @@ async def monitor_position(pos):
         title = f"⚠️ {symbol} dropped, monitor closely!"
         body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Soft stop:{round(soft_stop_price,2)}"
         log_notification("stop-loss-soft", symbol, title, body)
-
         tokens = get_all_tokens()
         tasks.extend([
-            send_push_async(
-                to_token=token,
-                title=title,
-                body=body,
-                data={"symbol": symbol, "type": "stop-loss-soft"}
-            ) for token in tokens
+            send_push_async(to_token=token, title=title, body=body,
+                            data={"symbol": symbol, "type": "stop-loss-soft"})
+            for token in tokens
         ])
         stop_sent.add("soft")
 
@@ -184,15 +177,11 @@ async def monitor_position(pos):
         title = f"❌ {symbol} hit stop-loss!"
         body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Hard stop:{round(hard_stop_price,2)}"
         log_notification("stop-loss-hard", symbol, title, body)
-
         tokens = get_all_tokens()
         tasks.extend([
-            send_push_async(
-                to_token=token,
-                title=title,
-                body=body,
-                data={"symbol": symbol, "type": "stop-loss-hard"}
-            ) for token in tokens
+            send_push_async(to_token=token, title=title, body=body,
+                            data={"symbol": symbol, "type": "stop-loss-hard"})
+            for token in tokens
         ])
         stop_sent.add("hard")
 
@@ -202,16 +191,13 @@ async def monitor_position(pos):
     conn.commit()
     conn.close()
 
-    # Run all push tasks asynchronously
     if tasks:
         await asyncio.gather(*tasks)
-
 
 async def monitor_positions():
     if not market_open_now():
         logger.info("⚠️ Market closed, skipping monitoring")
         return
-
     conn = db_conn()
     c = conn.cursor()
     c.execute("""SELECT symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, 
@@ -219,58 +205,26 @@ async def monitor_positions():
                  FROM positions""")
     positions = c.fetchall()
     conn.close()
-
     tasks = [monitor_position(pos) for pos in positions]
     if tasks:
         await asyncio.gather(*tasks)
 
-# ----------------------- SAVE + NOTIFY -----------------------
-def save_top_picks_to_firestore(picks, top_n=TOP_N):
-    ts_val = dt.utcnow().isoformat()
-    docs = [{"ts": ts_val, "symbol": p.get("symbol"), "last_price": p.get("last_price"),
-             "score": p.get("score"), "intraday_pct": p.get("intraday_pct")} for p in picks[:top_n]]
-    try:
-        db_firestore.collection("top_picks").document("latest").set({"timestamp": ts_val, "data": docs})
-        logger.info("✅ Top picks saved to Firestore")
-    except Exception as e:
-        logger.error("❌ Failed to save top picks to Firestore: %s", e)
-
-def log_notification(type_, symbol, title, body):
-    def _write():
-        conn = db_conn()
-        c = conn.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS notifications(
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     ts TEXT, type TEXT, symbol TEXT, note TEXT)""")
-        ts_val = dt.utcnow().isoformat()
-        c.execute("INSERT INTO notifications(ts,type,symbol,note) VALUES(?,?,?,?)",
-                  (ts_val, type_, symbol, title + " - " + body))
-        conn.commit()
-        conn.close()
-    try_db_write(_write)
+def monitor_positions_sync():
+    asyncio.run(monitor_positions())
 
 # ----------------------- TOP PICKS -----------------------
-scheduler = BackgroundScheduler()
-
-
 async def notify_all_users_about_top_pick(top_pick):
     if not top_pick:
         return
-
     tokens = get_all_tokens()
     if not tokens:
         return
-
     title = f"🔥 New BUY top pick: {top_pick['symbol']}"
     body = f"Score {round(top_pick.get('score',0), 4)} | Price {top_pick.get('last_price',0)}"
-
     await asyncio.gather(*[
-        send_push_async(
-            to_token=token,
-            title=title,
-            body=body,
-            data={"symbol": top_pick['symbol'], "type": "top-pick"}
-        ) for token in tokens
+        send_push_async(to_token=token, title=title, body=body,
+                        data={"symbol": top_pick['symbol'], "type": "top-pick"})
+        for token in tokens
     ])
 
 async def generate_and_store_top_picks(universe, limit=TOP_N):
@@ -282,20 +236,23 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
         p['last_price'] = float(p.get('last_price', 0.0))
         p['intraday_pct'] = float(p.get('features', {}).get('core', {}).get('intraday_pct', 0.0)) \
             if isinstance(p.get('features', {}), dict) else 0.0
-    save_top_picks_to_firestore(picks, top_n=limit)
+    # Save to Firestore
+    docs = [{"ts": ts_val, "symbol": p.get("symbol"), "last_price": p.get("last_price"),
+             "score": p.get("score"), "intraday_pct": p.get("intraday_pct")} for p in picks[:limit]]
+    try:
+        db_firestore.collection("top_picks").document("latest").set({"timestamp": ts_val, "data": docs})
+        logger.info("✅ Top picks saved to Firestore")
+    except Exception as e:
+        logger.error("❌ Failed to save top picks to Firestore: %s", e)
 
     try:
         top0 = picks[0] if picks else None
         if top0 and top0.get('combined_score', 0.0) >= BUY_THRESHOLD:
-            title = f"🔥 New BUY top pick: {top0['symbol']}"
-            body = f"Score {round(top0['combined_score'], 4)} | Price {top0['last_price']}"
-            log_notification("buy", top0['symbol'], title, body)
-            
-                
+            log_notification("buy", top0['symbol'], f"🔥 New BUY top pick: {top0['symbol']}",
+                             f"Score {round(top0['combined_score'], 4)} | Price {top0['last_price']}")
             await notify_all_users_about_top_pick(top0)
     except Exception as e:
         logger.error("Notification error: %s", e)
-
 
 async def run_top_picks_once(limit=TOP_N):
     universe = load_universe()
@@ -307,19 +264,12 @@ async def run_top_picks_once(limit=TOP_N):
     await generate_and_store_top_picks(universe, limit)
     logger.info("✅ Top picks generation completed.")
 
-def run_top_picks_async_wrapper():
-    try:
-        asyncio.run(run_top_picks_once())
-    except Exception as e:
-        logger.error("❌ Error running scheduled top picks job: %s", e)
-
-
-def monitor_positions_sync():
-    asyncio.run(monitor_positions())
-
 def run_top_picks_once_sync():
     asyncio.run(run_top_picks_once())
+
 # ----------------------- SCHEDULER -----------------------
+scheduler = BackgroundScheduler()
+
 def start_scheduler():
     add_missing_columns()
     if scheduler.running:
