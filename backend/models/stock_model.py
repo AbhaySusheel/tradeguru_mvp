@@ -315,123 +315,144 @@ class StockModel:
     # ---------------------------
     # Public API: analyze_stock
     # ---------------------------
-    def analyze_stock(
-        self,
-        symbol_or_df: Union[str, pd.DataFrame],
-        fetch_if_missing: bool = True,
-        ml_only: bool = False,
-        combine_weights: Optional[Dict[str, float]] = None,
-        return_raw: bool = False,
-        force_symbol: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Updated analyze_stock:
-        - if DataFrame is passed, use force_symbol to ensure correct naming.
-        - always returns symbol correctly as upper-case w/o .NS
-        - logs debug information
-        """
-        symbol = None
-        df = None
+def analyze_stock(
+    self,
+    symbol_or_df: Union[str, pd.DataFrame],
+    fetch_if_missing: bool = True,
+    ml_only: bool = False,
+    combine_weights: Optional[Dict[str, float]] = None,
+    return_raw: bool = False,
+    force_symbol: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Updated analyze_stock:
+    - if DataFrame is passed, use force_symbol to ensure correct naming.
+    - always returns symbol correctly as upper-case w/o .NS
+    - logs debug information
+    """
+    symbol = None
+    df = None
 
-        # CASE: DataFrame passed
-        if isinstance(symbol_or_df, pd.DataFrame):
-            if force_symbol is None:
-                logger.warning("[analyze_stock] DataFrame provided without force_symbol -> rejecting")
-                return {"ok": False, "error": "no_symbol_for_df", "symbol": "UNKNOWN"}
-            symbol = force_symbol.strip().upper()
-            df = symbol_or_df.copy().reset_index(drop=True)
-            if symbol.endswith(".NS"):
-                symbol = symbol.replace(".NS", "")
-        else:
-            # CASE: string symbol passed
-            symbol = str(symbol_or_df).strip().upper()
-            symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
+    # CASE: DataFrame passed
+    if isinstance(symbol_or_df, pd.DataFrame):
+        if force_symbol is None:
+            logger.warning("[analyze_stock] DataFrame provided without force_symbol -> rejecting")
+            return {"ok": False, "error": "no_symbol_for_df", "symbol": "UNKNOWN"}
+        symbol = force_symbol.strip().upper()
+        df = symbol_or_df.copy().reset_index(drop=True)
+        if symbol.endswith(".NS"):
+            symbol = symbol.replace(".NS", "")
+    else:
+        # CASE: string symbol passed
+        symbol = str(symbol_or_df).strip().upper()
+        symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
 
-            if fetch_if_missing:
-                try:
-                    df = fetch_intraday(symbol_ns, period="1d", interval="5m")
-                except Exception as e:
-                    logger.debug(f"[analyze_stock] fetch_intraday exception for {symbol_ns}: {e}")
-                    df = None
+        if fetch_if_missing:
+            try:
+                # 🔹 TRY intraday first (original behavior)
+                df = fetch_intraday(symbol_ns, period="1d", interval="5m")
+
+                # 🔹 FALLBACK: daily candles if intraday blocked
                 if df is None or len(df) < 2:
-                    logger.info(f"[analyze_stock] fetch failed or too short for {symbol_ns}")
-                    return {"ok": False, "error": "no_data", "symbol": symbol}
-            else:
-                logger.info(f"[analyze_stock] fetch_if_missing=False and no df provided for {symbol}")
-                return {"ok": False, "error": "no_df_provided", "symbol": symbol}
+                    logger.debug(f"[analyze_stock] intraday failed, fallback to daily for {symbol_ns}")
+                    df = fetch_intraday(symbol_ns, period="5d", interval="1d")
 
-        # Base features
-        base_feats = compute_features(df)
-        if base_feats is None:
-            logger.info(f"[analyze_stock] compute_features failed for {symbol}")
-            return {"ok": False, "error": "compute_features_failed", "symbol": symbol}
+            except Exception as e:
+                logger.debug(f"[analyze_stock] fetch exception for {symbol_ns}: {e}")
+                df = None
 
-        # ML input + ML prob
-        ml_input = self._augment_features_for_ml(df, base_feats)
-        ml_prob = self._predict_ml_prob(ml_input)
-        if math.isnan(ml_prob):
-            ml_prob = 0.0
-
-        # Engine score
-        try:
-            engine_scored = score_from_features([base_feats])
-            engine_score = engine_scored[0].get("score", 0.0) if engine_scored else 0.0
-        except Exception as e:
-            logger.debug(f"[analyze_stock] score_from_features error for {symbol}: {e}")
-            engine_score = 0.0
-
-        # Combine (weights may be overridden)
-        weights = combine_weights or self.combine_weights
-        combined_score = self.combine_scores(ml_prob, engine_score, weights)
-
-        # Label and buy confidence
-        label = _label_from_prob_and_score(ml_prob, combined_score)
-        buy_conf = _safe_float(base_feats.get("buy_confidence", compute_buy_confidence(base_feats)))
-
-        # Trade plan
-        entry = float(base_feats.get("last_price", float(df["Close"].iloc[-1])))
-        atr_val = float(ml_input.get("atr_val", 0.0))
-        if math.isnan(atr_val) or atr_val <= 0:
-            sl = entry * 0.99
-            targets = [entry * 1.02, entry * 1.04]
+            if df is None or len(df) < 2:
+                logger.info(f"[analyze_stock] fetch failed or too short for {symbol_ns}")
+                return {"ok": False, "error": "no_data", "symbol": symbol}
         else:
-            sl = entry - atr_val
-            targets = [entry + atr_val * r for r in (1.5, 2.5, 4.0)]
+            logger.info(f"[analyze_stock] fetch_if_missing=False and no df provided for {symbol}")
+            return {"ok": False, "error": "no_df_provided", "symbol": symbol}
 
-        # Debug log
-        logger.info(f"[analyze_stock] {symbol} price={entry:.4f} intraday_pct={base_feats.get('intraday_pct')} ml_prob={ml_prob:.4f} engine={engine_score:.4f} combined={combined_score:.4f} buy_conf={buy_conf:.2f}")
+    # Base features
+    base_feats = compute_features(df)
+    if base_feats is None:
+        logger.info(f"[analyze_stock] compute_features failed for {symbol}")
+        return {"ok": False, "error": "compute_features_failed", "symbol": symbol}
 
-        result = {
-            "ok": True,
-            "symbol": symbol.replace(".NS", "").upper(),
-            "last_price": float(entry),
-            "ml_buy_prob": float(round(ml_prob, 4)),
-            "engine_score": float(round(engine_score, 4)),
-            "combined_score": float(round(combined_score, 4)),
-            "label": label,
-            "buy_confidence": float(round(buy_conf, 4)),
-            "trade_plan": {"entry": float(entry), "sl": float(sl), "targets": [float(round(t, 4)) for t in targets]},
-            "features": {
-                "core": {
-                    "intraday_pct": base_feats.get("intraday_pct"),
-                    "ma_short": base_feats.get("ma_short"),
-                    "ma_long": base_feats.get("ma_long"),
-                    "ma_diff": base_feats.get("ma_diff"),
-                    "rsi": base_feats.get("rsi"),
-                    "vol_ratio": base_feats.get("vol_ratio"),
-                    "vol_strength": base_feats.get("vol_strength"),
-                    "sr_score": base_feats.get("sr_score"),
-                    "buy_confidence": base_feats.get("buy_confidence"),
-                },
-                "ml_vector_preview": {k: ml_input.get(k) for k in list(ml_input.keys())[:60]}
+    # ML input + ML prob
+    ml_input = self._augment_features_for_ml(df, base_feats)
+    ml_prob = self._predict_ml_prob(ml_input)
+    if math.isnan(ml_prob):
+        ml_prob = 0.0
+
+    # Engine score
+    try:
+        engine_scored = score_from_features([base_feats])
+        engine_score = engine_scored[0].get("score", 0.0) if engine_scored else 0.0
+    except Exception as e:
+        logger.debug(f"[analyze_stock] score_from_features error for {symbol}: {e}")
+        engine_score = 0.0
+
+    # Combine (weights may be overridden)
+    weights = combine_weights or self.combine_weights
+    combined_score = self.combine_scores(ml_prob, engine_score, weights)
+
+    # Label and buy confidence
+    label = _label_from_prob_and_score(ml_prob, combined_score)
+    buy_conf = _safe_float(base_feats.get("buy_confidence", compute_buy_confidence(base_feats)))
+
+    # Trade plan
+    entry = float(base_feats.get("last_price", float(df["Close"].iloc[-1])))
+    atr_val = float(ml_input.get("atr_val", 0.0))
+    if math.isnan(atr_val) or atr_val <= 0:
+        sl = entry * 0.99
+        targets = [entry * 1.02, entry * 1.04]
+    else:
+        sl = entry - atr_val
+        targets = [entry + atr_val * r for r in (1.5, 2.5, 4.0)]
+
+    # Debug log
+    logger.info(
+        f"[analyze_stock] {symbol} price={entry:.4f} "
+        f"intraday_pct={base_feats.get('intraday_pct')} "
+        f"ml_prob={ml_prob:.4f} engine={engine_score:.4f} "
+        f"combined={combined_score:.4f} buy_conf={buy_conf:.2f}"
+    )
+
+    result = {
+        "ok": True,
+        "symbol": symbol.replace(".NS", "").upper(),
+        "last_price": float(entry),
+        "ml_buy_prob": float(round(ml_prob, 4)),
+        "engine_score": float(round(engine_score, 4)),
+        "combined_score": float(round(combined_score, 4)),
+        "label": label,
+        "buy_confidence": float(round(buy_conf, 4)),
+        "trade_plan": {
+            "entry": float(entry),
+            "sl": float(sl),
+            "targets": [float(round(t, 4)) for t in targets]
+        },
+        "features": {
+            "core": {
+                "intraday_pct": base_feats.get("intraday_pct"),
+                "ma_short": base_feats.get("ma_short"),
+                "ma_long": base_feats.get("ma_long"),
+                "ma_diff": base_feats.get("ma_diff"),
+                "rsi": base_feats.get("rsi"),
+                "vol_ratio": base_feats.get("vol_ratio"),
+                "vol_strength": base_feats.get("vol_strength"),
+                "sr_score": base_feats.get("sr_score"),
+                "buy_confidence": base_feats.get("buy_confidence"),
             },
-            "explanation": f"ML_prob={round(ml_prob,3)} | engine_score={round(engine_score,3)} | buy_conf={round(buy_conf,2)}"
-        }
+            "ml_vector_preview": {k: ml_input.get(k) for k in list(ml_input.keys())[:60]}
+        },
+        "explanation": (
+            f"ML_prob={round(ml_prob,3)} | "
+            f"engine_score={round(engine_score,3)} | "
+            f"buy_conf={round(buy_conf,2)}"
+        )
+    }
 
-        if return_raw:
-            result["raw"] = {"base_feats": base_feats, "ml_input": ml_input}
+    if return_raw:
+        result["raw"] = {"base_feats": base_feats, "ml_input": ml_input}
 
-        return result
+    return result
 
 # Singleton convenience
 _default_engine: Optional[StockModel] = None
