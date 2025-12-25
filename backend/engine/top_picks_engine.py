@@ -49,6 +49,8 @@ async def analyze_one(symbol: str) -> Dict[str, Any]:
         traceback.print_exc()
         return {"ok": False, "symbol": sym_plain, "error": str(e)}
 
+
+
 async def generate_top_picks(symbols, limit=3):
     """
     Analyze symbols and return top picks.
@@ -70,3 +72,4 @@ async def generate_top_picks(symbols, limit=3):
 
     clean.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
     return clean[:limit]
+
