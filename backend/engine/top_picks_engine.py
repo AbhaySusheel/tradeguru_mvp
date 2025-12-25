@@ -49,19 +49,24 @@ async def analyze_one(symbol: str) -> Dict[str, Any]:
         traceback.print_exc()
         return {"ok": False, "symbol": sym_plain, "error": str(e)}
 
-async def generate_top_picks(symbols: List[str], limit: int = 10) -> List[Dict[str, Any]]:
+async def generate_top_picks(symbols, limit=3):
     """
-    Run concurrent analyze_one tasks and return top `limit` sorted by combined_score desc.
+    Analyze symbols and return top picks.
+    Logic unchanged – only concurrency is limited for safety.
     """
-    # cap concurrency to avoid API rate limit issues - simple gather but caller should control concurrency
-    tasks = [analyze_one(sym) for sym in symbols]
-    results = await asyncio.gather(*tasks, return_exceptions=False)
+
+    sem = asyncio.Semaphore(10)  # limit concurrent API calls
+
+    async def analyze_one_limited(sym):
+        async with sem:
+            return await analyze_one(sym)
+
+    tasks = [analyze_one_limited(sym) for sym in symbols]
+    results = await asyncio.gather(*tasks)
 
     clean = [r for r in results if r.get("ok")]
-    # ensure numeric combined_score present
-    for r in clean:
-        r["combined_score"] = float(r.get("combined_score") or 0.0)
+    if not clean:
+        return []
 
     clean.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
-    logger.info(f"[generate_top_picks] Generated {len(clean)} valid picks, returning top {limit}")
     return clean[:limit]

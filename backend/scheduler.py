@@ -264,34 +264,54 @@ async def notify_all_users_about_top_pick(top_pick):
     title = f"🔥 New BUY top pick: {top_pick['symbol']}"
     body = f"Score {round(top_pick.get('score',0), 4)} | Price {top_pick.get('last_price',0)}"
 
-    await asyncio.gather(*[
-        send_push_async(
-            to_token=token,
-            title=title,
-            body=body,
-            data={"symbol": top_pick['symbol'], "type": "top-pick"}
-        ) for token in tokens
-    ])
+    for i in range(0, len(tokens), 20):
+        batch = tokens[i:i + 20]
+        try:
+            await asyncio.gather(*[
+                send_push_async(
+                    to_token=token,
+                    title=title,
+                    body=body,
+                    data={"symbol": top_pick['symbol'], "type": "top-pick"}
+                ) for token in batch
+            ], return_exceptions=True)
+        except Exception as e:
+            logger.warning(f"Push batch failed: {e}")
 
 async def generate_and_store_top_picks(universe, limit=TOP_N):
     picks = await generate_top_picks(universe, limit)
+    if not picks:
+        logger.info("⚠️ No valid top picks generated")
+        return
+
     ts_val = dt.utcnow().isoformat()
+    clean = []
+
     for p in picks:
+        if not p.get("ok"):
+            logger.info(f"⏭️ Skipped {p.get('symbol')} (no data)")
+            continue
+
         p['ts'] = ts_val
         p['score'] = float(p.get('combined_score', 0.0))
         p['last_price'] = float(p.get('last_price', 0.0))
-        p['intraday_pct'] = float(p.get('features', {}).get('core', {}).get('intraday_pct', 0.0)) \
-            if isinstance(p.get('features', {}), dict) else 0.0
-    save_top_picks_to_firestore(picks, top_n=limit)
+        p['intraday_pct'] = float(
+            p.get('features', {}).get('core', {}).get('intraday_pct', 0.0)
+        ) if isinstance(p.get('features', {}), dict) else 0.0
+
+        clean.append(p)
+
+    if not clean:
+        return
+
+    save_top_picks_to_firestore(clean, top_n=limit)
 
     try:
-        top0 = picks[0] if picks else None
-        if top0 and top0.get('combined_score', 0.0) >= BUY_THRESHOLD:
+        top0 = clean[0]
+        if top0.get('combined_score', 0.0) >= BUY_THRESHOLD:
             title = f"🔥 New BUY top pick: {top0['symbol']}"
             body = f"Score {round(top0['combined_score'], 4)} | Price {top0['last_price']}"
             log_notification("buy", top0['symbol'], title, body)
-            
-                
             await notify_all_users_about_top_pick(top0)
     except Exception as e:
         logger.error("Notification error: %s", e)
@@ -325,8 +345,23 @@ def start_scheduler():
     if scheduler.running:
         logger.warning("⚠️ Scheduler already running.")
         return
-    scheduler.add_job(monitor_positions_sync, 'interval', minutes=MONITOR_INTERVAL_MIN)
-    scheduler.add_job(run_top_picks_once_sync, 'interval', minutes=TOPPICKS_INTERVAL_MIN)
+
+    scheduler.add_job(
+        monitor_positions_sync,
+        'interval',
+        minutes=MONITOR_INTERVAL_MIN,
+        max_instances=1,
+        coalesce=True
+    )
+
+    scheduler.add_job(
+        run_top_picks_once_sync,
+        'interval',
+        minutes=TOPPICKS_INTERVAL_MIN,
+        max_instances=1,
+        coalesce=True
+    )
+
     scheduler.start()
     logger.info("✅ Scheduler started.")
 
