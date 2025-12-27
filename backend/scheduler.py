@@ -209,7 +209,7 @@ async def monitor_position(pos):
 
 async def monitor_positions():
     if not market_open_now():
-        logger.info("⚠️ Market closed, skipping monitoring")
+        logger.info("⚠️ Market closed — skipping position monitoring")
         return
 
     conn = db_conn()
@@ -318,10 +318,15 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
 
 
 async def run_top_picks_once(limit=TOP_N):
+    if not market_open_now():
+        logger.info("⏸️ Market closed — skipping top picks generation")
+        return
+
     universe = load_universe()
     if not universe:
         logger.warning("⚠️ No universe available for top picks")
         return
+
     universe = universe[:200]
     logger.info(f"🚀 Running Top Picks for {len(universe)} stocks...")
     await generate_and_store_top_picks(universe, limit)
