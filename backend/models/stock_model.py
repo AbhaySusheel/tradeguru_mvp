@@ -87,6 +87,7 @@ class StockModel:
 
 
     # cache per-symbol models
+    _MODEL_CACHE = {}
     _MAX_MODEL_CACHE = 200
 
 
