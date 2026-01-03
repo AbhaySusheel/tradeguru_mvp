@@ -38,8 +38,7 @@ if not logger.handlers:
 # ---------------------------
 # Configuration / Defaults
 # ---------------------------
-DEFAULT_MODEL_PATH = str(Path(__file__).parent / "xgb_buyprob_model_v3.joblib")
-DEFAULT_FEATURES_PATH = str(Path(__file__).parent / "model_features_v3.json")
+
 
 # default combination weights (ml lighter, engine heavier as requested)
 DEFAULT_COMBINE_WEIGHTS = {
@@ -85,66 +84,36 @@ def _percentile_rank(series: pd.Series, value: float) -> float:
 # ---------------------------
 class StockModel:
 
+
+
+    # cache per-symbol models
+    _MAX_MODEL_CACHE = 200
+
+
     
     def __init__(
         self,
-        model_bundle_path: Optional[str] = None,
-        model_features_path: Optional[str] = None,
+        
         combine_weights: Optional[Dict[str, float]] = None,
         verbose: bool = False,
     ):
         self.verbose = verbose
-        self.model_bundle_path = model_bundle_path or DEFAULT_MODEL_PATH
-        self.model_features_path = model_features_path or DEFAULT_FEATURES_PATH
+  
         self.combine_weights = combine_weights or DEFAULT_COMBINE_WEIGHTS
+        
+
 
         # ML objects
         self.booster: Optional[xgb.Booster] = None
         self.scaler = None
         self.feature_order: List[str] = []
         self.best_iteration: Optional[int] = None
+        self.model_quality: Dict[str, float] = {}
 
         # load on init
-        self._load_model_bundle()
-        self._load_feature_order()
+        #self._load_model_bundle()
+        #self._load_feature_order()
 
-    # ---------------------------
-    # Loading utilities
-    # ---------------------------
-    def _load_model_bundle(self):
-        p = Path(self.model_bundle_path)
-        if not p.exists():
-            if self.verbose:
-                logger.warning(f"[StockModel] Model bundle {p} not found, ML disabled.")
-            return
-        bundle = joblib.load(str(p))
-        # train script stored dict with keys: 'booster','scaler','features','best_iteration'
-        self.booster = bundle.get("booster", None) if isinstance(bundle, dict) else (bundle if isinstance(bundle, xgb.Booster) else None)
-        self.scaler = bundle.get("scaler", None) if isinstance(bundle, dict) else None
-        self.best_iteration = bundle.get("best_iteration", None) if isinstance(bundle, dict) else None
-        if self.verbose:
-            logger.info(f"[StockModel] Loaded model bundle from {p} - booster: {self.booster is not None}")
-
-    def _load_feature_order(self):
-        p = Path(self.model_features_path)
-        if not p.exists():
-            if self.verbose:
-                logger.warning(f"[StockModel] Feature order {p} not found, falling back to model-bundle features if present.")
-            return
-        try:
-            d = json.loads(p.read_text(encoding="utf8"))
-            if isinstance(d, dict) and "features" in d:
-                self.feature_order = list(d["features"])
-            elif isinstance(d, list):
-                self.feature_order = list(d)
-            else:
-                self.feature_order = list(d.get("features", [])) if isinstance(d, dict) else []
-            if self.verbose:
-                logger.info(f"[StockModel] Loaded {len(self.feature_order)} model features from {p}")
-        except Exception as e:
-            if self.verbose:
-                logger.warning(f"[StockModel] Failed to load feature order: {e}")
-            self.feature_order = []
 
     # ---------------------------
     # ML Prediction
@@ -156,7 +125,9 @@ class StockModel:
 
         # Prepare vector in feature_order
         if self.feature_order:
-            X = np.array([[ _safe_float(feature_dict.get(f, np.nan)) for f in self.feature_order ]], dtype=float)
+            for f in self.feature_order:
+                feature_dict.setdefault(f, 0.0)
+            X = np.array([[ _safe_float(feature_dict[f]) for f in self.feature_order ]], dtype=float)
         else:
             # fallback: use whatever keys available sorted
             keys = sorted(feature_dict.keys())
@@ -253,8 +224,8 @@ class StockModel:
         try:
             ema9 = close.ewm(span=9, adjust=False).mean().iloc[-1]
             ema21 = close.ewm(span=21, adjust=False).mean().iloc[-1]
-            out["ema9"] = float(ema9)
-            out["ema21"] = float(ema21)
+            #out["ema9"] = float(ema9)
+            #out["ema21"] = float(ema21)
             out["ema9_21_diff"] = float(ema9 - ema21)
         except Exception:
             out["ema9"] = out["ema21"] = out["ema9_21_diff"] = 0.0
@@ -314,10 +285,61 @@ class StockModel:
         combined = (ml_w * ml_p + eng_w * eng_p) / total
         return float(max(0.0, min(1.0, combined)))
 
+    
+    def _load_symbol_model(self, symbol: str):
+        """
+        Load ONE ML model per symbol.
+        Falls back gracefully if model does not exist.
+        """
+        symbol = symbol.upper()
+        if symbol in self._MODEL_CACHE:
+            bundle = self._MODEL_CACHE[symbol]
+            self.booster = bundle["booster"]
+            self.scaler = bundle["scaler"]
+            self.feature_order = bundle["features"]
+            self.best_iteration = bundle["best_iteration"]
+            self.model_quality = bundle.get("metrics", {})
+            return
+
+        model_path = Path(__file__).parent / f"xgb_buyprob_{symbol}.joblib"
+        if not model_path.exists():
+            self.booster = None
+            self.scaler = None
+            self.feature_order = []
+            self.best_iteration = None
+            self.model_quality = {}
+            return
+
+        bundle = joblib.load(str(model_path))
+
+        self.booster = bundle.get("booster")
+        self.scaler = bundle.get("scaler")
+        self.feature_order = bundle.get("features", [])
+        self.best_iteration = bundle.get("best_iteration")
+        self.model_quality = bundle.get("metrics", {})
+
+        self._MODEL_CACHE[symbol] = bundle
+        if len(self._MODEL_CACHE) > self._MAX_MODEL_CACHE:
+            self._MODEL_CACHE.pop(next(iter(self._MODEL_CACHE)))
+    
+    def _adaptive_ml_weight(self) -> float:
+        """
+        Dynamically scale ML weight based on model quality.
+        """
+        auc = self.model_quality.get("auc", 0.5)
+        if auc >= 0.65:
+            return 0.45
+        if auc >= 0.60:
+            return 0.35
+        if auc >= 0.55:
+            return 0.25
+        return 0.10  # weak model → engine dominates
+    
+
     # ---------------------------
     # Public API: analyze_stock
     # ---------------------------
-        # ---------------------------
+    # ---------------------------
     # Public API: analyze_stock
     # ---------------------------
     def analyze_stock(
@@ -344,14 +366,19 @@ class StockModel:
             if force_symbol is None:
                 logger.warning("[analyze_stock] DataFrame provided without force_symbol -> rejecting")
                 return {"ok": False, "error": "no_symbol_for_df", "symbol": "UNKNOWN"}
-            symbol = force_symbol.strip().upper()
+            
+            symbol = force_symbol.strip().upper().replace(".NS", "")
             df = symbol_or_df.copy().reset_index(drop=True)
-            if symbol.endswith(".NS"):
-                symbol = symbol.replace(".NS", "")
+            # 🔥 load per-symbol ML model
+            self._load_symbol_model(symbol)
+            
+
         else:
             # CASE: string symbol passed
             symbol = str(symbol_or_df).strip().upper()
-            symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
+            symbol_clean = symbol.replace(".NS", "")
+            symbol_ns =  symbol_clean + ".NS"
+            self._load_symbol_model(symbol_clean)
 
             if fetch_if_missing:
                 try:
@@ -382,6 +409,8 @@ class StockModel:
         if math.isnan(ml_prob):
             ml_prob = 0.0
 
+        if ml_only:
+            return {"ok": True,"symbol": symbol,"ml_buy_prob": float(round(ml_prob, 4)),"label": _label_from_prob_and_score(ml_prob, ml_prob),}
         try:
             engine_scored = score_from_features([base_feats])
             engine_score = engine_scored[0].get("score", 0.0) if engine_scored else 0.0
@@ -389,10 +418,13 @@ class StockModel:
             logger.debug(f"[analyze_stock] score_from_features error for {symbol}: {e}")
             engine_score = 0.0
 
-        weights = combine_weights or self.combine_weights
+        ml_w = self._adaptive_ml_weight()
+        weights = combine_weights or {"ml": ml_w, "engine": 1.0 - ml_w}
+
+        
         combined_score = self.combine_scores(ml_prob, engine_score, weights)
 
-        label = _label_from_prob_and_score(ml_prob, combined_score)
+        label = _label_from_prob_and_score(combined_score, combined_score)
         buy_conf = _safe_float(base_feats.get("buy_confidence", compute_buy_confidence(base_feats)))
 
         entry = float(base_feats.get("last_price", float(df["Close"].iloc[-1])))
@@ -437,20 +469,20 @@ class StockModel:
 # Singleton convenience
 _default_engine: Optional[StockModel] = None
 
-def get_default_engine(model_bundle_path: Optional[str] = None, features_path: Optional[str] = None, verbose: bool = False) -> StockModel:
+def get_default_engine(verbose: bool = False) -> StockModel:
     global _default_engine
     if _default_engine is None:
-        _default_engine = StockModel(model_bundle_path=model_bundle_path, model_features_path=features_path, verbose=verbose)
+        _default_engine = StockModel(verbose=verbose)
+
     return _default_engine
 
 # CLI quick test
 if __name__ == "__main__":
     import argparse, pprint
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", required=True)
-    parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
-    parser.add_argument("--features", default=DEFAULT_FEATURES_PATH)
     args = parser.parse_args()
-    eng = get_default_engine(model_bundle_path=args.model, features_path=args.features, verbose=True)
-    out = eng.analyze_stock(args.symbol, fetch_if_missing=True, return_raw=False)
+    eng = get_default_engine(verbose=True)
+    out = eng.analyze_stock(args.symbol, fetch_if_missing=True)
     pprint.pprint(out, indent=2)
