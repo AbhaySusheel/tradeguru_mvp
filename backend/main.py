@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 
 from db_init import init_db  # Initializes Firebase and SQLite
 from scheduler import start_scheduler, run_top_picks_once
+
 from routes.stocks import router as stocks_router
 from routes.picks import router as picks_router
 from routes.positions import router as positions_router

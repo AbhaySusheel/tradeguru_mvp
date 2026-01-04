@@ -160,41 +160,6 @@ async def top_picks_cached(limit: int = DEFAULT_LIMIT):
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Failed to read cached top picks: {e}")
 
-# buy/sell endpoints unchanged (kept minimal)
-@router.post("/buy")
-def buy_stock(payload: dict):
-    symbol = payload.get("symbol")
-    price = payload.get("price")
-    size = payload.get("size", 1.0)
-    target = payload.get("target", 5.0)
-    stop = payload.get("stop", 1.5)
-    if not symbol or price is None:
-        raise HTTPException(status_code=400, detail="symbol and price required")
-    ts = dt.utcnow().isoformat()
-    conn = sqlite3.connect("app.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO positions(symbol,entry_price,entry_ts,size,status,target_pct,stop_pct) VALUES (?,?,?,?,?,?,?)",
-              (symbol, price, ts, size, "OPEN", target, stop))
-    conn.commit()
-    conn.close()
-    return {"status": "ok", "message": "Position opened"}
-
-@router.post("/sell")
-def sell_stock(payload: dict):
-    symbol = payload.get("symbol")
-    price = payload.get("price")
-    if not symbol or price is None:
-        raise HTTPException(status_code=400, detail="symbol and price required")
-    ts = dt.utcnow().isoformat()
-    conn = sqlite3.connect("app.db")
-    c = conn.cursor()
-    c.execute("SELECT entry_price FROM positions WHERE symbol=? AND status='OPEN' ORDER BY id DESC LIMIT 1", (symbol,))
-    row = c.fetchone()
-    entry_price = row[0] if row else None
-    c.execute("UPDATE positions SET exit_price=?,exit_ts=?,status='CLOSED' WHERE symbol=? AND status='OPEN'", (price, ts, symbol))
-    conn.commit()
-    conn.close()
-    return {"status": "ok", "message": "Position closed"}
 
 from pydantic import BaseModel
 

@@ -50,18 +50,7 @@ async def buy_stock(request: Request):
     def insert_position():
         conn = db_conn()
         c = conn.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS positions(
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     symbol TEXT,
-                     entry_price REAL,
-                     predicted_max REAL,
-                     status TEXT,
-                     soft_stop_pct REAL,
-                     hard_stop_pct REAL,
-                     profit_alerts_sent TEXT,
-                     stop_alerts_sent TEXT,
-                     created_at TEXT
-                     )""")
+        
         c.execute("""INSERT INTO positions(
                      symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct,
                      profit_alerts_sent, stop_alerts_sent, created_at

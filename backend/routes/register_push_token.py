@@ -13,26 +13,14 @@ class PushToken(BaseModel):
 
 @router.post("/register-push-token")
 async def register_push_token(payload: PushToken):
-    """
-    Stores the Expo push token in the database.
-    """
-    token = payload.token
+    token = payload.token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         c = conn.cursor()
 
-        # Create table if not exists
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS push_tokens (
-                token TEXT PRIMARY KEY,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        # Insert token if not exists
         c.execute("""
             INSERT OR IGNORE INTO push_tokens (token)
             VALUES (?)
@@ -41,7 +29,7 @@ async def register_push_token(payload: PushToken):
         conn.commit()
         conn.close()
 
-        return {"success": True, "message": "Token registered successfully."}
+        return {"success": True, "message": "Token registered"}
     except Exception as e:
         print("Error registering push token:", e)
         raise HTTPException(status_code=500, detail="Failed to register token")

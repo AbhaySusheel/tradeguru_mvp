@@ -83,10 +83,11 @@ def init_db():
       ts TEXT,
       type TEXT,
       symbol TEXT,
-      title TEXT,
-      body TEXT
+      note TEXT
     )
     """)
+    
+
 
     # helper to prevent repeated alerts
     c.execute("""
