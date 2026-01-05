@@ -13,7 +13,7 @@ from models.stock_model import get_default_engine
 # ---------------- CONFIG ----------------
 ROUTE_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
 SYMBOL_TIMEOUT_SEC = float(os.getenv("SYMBOL_TIMEOUT_SEC", "12.0"))
-MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "50"))
+MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "200"))
 DEFAULT_LIMIT = int(os.getenv("TOP_N", "10"))
 
 router = APIRouter()
