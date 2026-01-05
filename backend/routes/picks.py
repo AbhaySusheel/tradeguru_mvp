@@ -132,15 +132,25 @@ async def top_picks(
         for sym in universe
     ]
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
 
     valid = []
-    for r in results:
-        if isinstance(r, Exception):
-            logger.warning(f"Analysis exception: {r}")
-            continue
-        if r and r.get("ok"):
-            valid.append(r)
+
+    for coro in asyncio.as_completed(tasks):
+        try:
+            r = await coro
+            if r and r.get("ok"):
+                valid.append(r)
+                if len(valid) >= limit * 2:
+                    break
+
+        except Exception as e:
+            logger.warning(f"Analysis exception: {e}")    
+
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+
 
     if not valid:
         raise HTTPException(status_code=502, detail="No valid analysis results")
