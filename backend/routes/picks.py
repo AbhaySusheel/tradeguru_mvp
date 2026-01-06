@@ -128,7 +128,9 @@ async def top_picks(
 
     semaphore = asyncio.Semaphore(batch_size)
     tasks = [
+        asyncio.create_task(
         _analyze_symbol_async(sym, semaphore, timeout_sec)
+        )
         for sym in universe
     ]
 

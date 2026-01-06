@@ -128,20 +128,25 @@ class StockModel:
         if self.feature_order:
             for f in self.feature_order:
                 feature_dict.setdefault(f, 0.0)
-            X = np.array([[ _safe_float(feature_dict[f]) for f in self.feature_order ]], dtype=float)
+            X_df = pd.DataFrame([[_safe_float(feature_dict[f]) for f in self.feature_order]],columns=self.feature_order,dtype=float,)
         else:
             # fallback: use whatever keys available sorted
             keys = sorted(feature_dict.keys())
-            X = np.array([[ _safe_float(feature_dict.get(k, np.nan)) for k in keys ]], dtype=float)
+            X_df = pd.DataFrame([[_safe_float(feature_dict.get(k, np.nan)) for k in keys]],columns=keys,dtype=float,)
 
         # apply scaler if present
         if self.scaler is not None:
             try:
-                X = self.scaler.transform(X)
-            except Exception:
-                pass
+                X_scaled = self.scaler.transform(X_df)
+            except Exception as e:
+                if self.verbose:
+                    logger.warning(f"[StockModel] Scaler transform failed: {e}")
+                return float("nan")
 
-        dmat = xgb.DMatrix(X, feature_names=self.feature_order if self.feature_order else None)
+        else:
+            X_scaled = X_df.values        
+
+        dmat = xgb.DMatrix(X_scaled,feature_names=self.feature_order if self.feature_order else None)
         try:
             if self.best_iteration is not None:
                 pred = self.booster.predict(dmat, iteration_range=(0, int(self.best_iteration) + 1))
