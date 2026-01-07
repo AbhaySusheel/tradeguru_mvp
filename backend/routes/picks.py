@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 
 from scheduler import load_universe, run_top_picks_once
 from models.stock_model import get_default_engine
+from data.top_picks_cache import get_top_picks_cache
+
 
 # ---------------- CONFIG ----------------
 ROUTE_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
@@ -104,80 +106,21 @@ async def _analyze_symbol_async(
 # ---------------- ROUTES ----------------
 
 @router.get("/top-picks")
-async def top_picks(
-    limit: int = DEFAULT_LIMIT,
-    max_symbols: int = MAX_SYMBOLS,
-    batch_size: int = ROUTE_BATCH_SIZE,
-    timeout_sec: float = SYMBOL_TIMEOUT_SEC,
-):
-    limit = int(limit)
-    max_symbols = int(max_symbols)
-    batch_size = int(batch_size)
-    timeout_sec = float(timeout_sec)
+async def top_picks():
+    cached = get_top_picks_cache()
 
-    if limit <= 0:
-        raise HTTPException(status_code=400, detail="limit must be > 0")
-
-    universe = load_universe()
-    if not universe:
-        raise HTTPException(status_code=503, detail="Universe unavailable")
-
-    universe = universe[:max_symbols]
-
-    logger.info(f"🔍 Analyzing {len(universe)} symbols")
-
-    semaphore = asyncio.Semaphore(batch_size)
-    tasks = [
-        asyncio.create_task(
-        _analyze_symbol_async(sym, semaphore, timeout_sec)
+    if not cached["data"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Top picks not ready yet"
         )
-        for sym in universe
-    ]
-
-    
-
-    valid = []
-
-    for coro in asyncio.as_completed(tasks):
-        try:
-            r = await coro
-            if r and r.get("ok"):
-                valid.append(r)
-                if len(valid) >= limit * 2:
-                    break
-
-        except Exception as e:
-            logger.warning(f"Analysis exception: {e}")    
-
-    for task in tasks:
-        if not task.done():
-            task.cancel()
-
-
-    if not valid:
-        raise HTTPException(status_code=502, detail="No valid analysis results")
-
-    valid.sort(key=lambda x: x.get("combined_score", 0.0), reverse=True)
-    top = valid[:limit]
-
-    response = []
-    for t in top:
-        response.append(clean_for_json({
-            "symbol": t["symbol"],
-            "last_price": t["last_price"],
-            "combined_score": t["combined_score"],
-            "ml_buy_prob": t["ml_buy_prob"],
-            "engine_score": t["engine_score"],
-            "buy_confidence": t["buy_confidence"],
-            "trade_plan": t.get("trade_plan", {})
-        }))
 
     return {
         "status": "success",
-        "timestamp": dt.utcnow().isoformat(),
-        "universe_count": len(universe),
-        "returned": len(response),
-        "top_picks": response
+        "interval": cached.get("interval", "5m"),
+        "timestamp": cached.get("timestamp"),
+        "returned": len(cached["data"]),
+        "top_picks": cached["data"]
     }
 
 @router.get("/update-top-picks")
