@@ -300,15 +300,15 @@ class StockModel:
         symbol = symbol.upper()
         if symbol in self._MODEL_CACHE:
             bundle = self._MODEL_CACHE[symbol]
-            self.booster = bundle["booster"]
-            self.scaler = bundle["scaler"]
-            self.feature_order = bundle["features"]
-            self.best_iteration = bundle["best_iteration"]
+            self.booster = bundle.get("booster")
+            self.scaler = bundle.get("scaler")
+            self.feature_order = bundle.get("features", [])
+            self.best_iteration = bundle.get("best_iteration")
             self.model_quality = bundle.get("metrics", {})
             return
 
-        bundle_path = Path(__file__).parent / f"xgb_buyprob_{symbol}.joblib"
-        if not bundle_path.exists():
+        model_path = Path(__file__).parent / f"xgb_buyprob_{symbol}.joblib"
+        if not model_path.exists():
             self.booster = None
             self.scaler = None
             self.feature_order = []
@@ -316,23 +316,16 @@ class StockModel:
             self.model_quality = {}
             return
 
-        bundle = joblib.load(str(bundle_path))
-        booster = xgb.Booster()
-        booster.load_model(bundle["model_path"])  
+        bundle = joblib.load(str(model_path))
+        
 
-        self.booster = booster
+        self.booster = bundle.get("booster")
         self.scaler = bundle.get("scaler")
         self.feature_order = bundle.get("features", [])
         self.best_iteration = bundle.get("best_iteration")
         self.model_quality = bundle.get("metrics", {})
 
-        self._MODEL_CACHE[symbol] = {
-             "booster": booster,
-             "scaler": self.scaler,
-             "features": self.feature_order,
-             "best_iteration": self.best_iteration,
-             "metrics": self.model_quality,
-        }
+        self._MODEL_CACHE[symbol] = bundle
         if len(self._MODEL_CACHE) > self._MAX_MODEL_CACHE:
             self._MODEL_CACHE.pop(next(iter(self._MODEL_CACHE)))
     

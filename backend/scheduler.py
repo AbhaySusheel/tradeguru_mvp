@@ -19,6 +19,8 @@ from firebase_admin import firestore
 
 from datetime import datetime as dt, timedelta, time as dttime
 from apscheduler.schedulers.background import BackgroundScheduler
+from data.top_picks_cache import update_top_picks_cache
+
 
 from routes.register_push_token import get_all_tokens  # helper to fetch all saved Expo tokens
 from utils.notifier import send_push_async  # async push version
@@ -305,6 +307,8 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
         return
 
     save_top_picks_to_firestore(clean, top_n=limit)
+    update_top_picks_cache(clean)
+    logger.info("🧠 Top picks cached in memory")
 
     try:
         top0 = clean[0]
@@ -318,9 +322,9 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
 
 
 async def run_top_picks_once(limit=TOP_N):
-    if not market_open_now():
-        logger.info("⏸️ Market closed — skipping top picks generation")
-        return
+    #if not market_open_now():
+    #    logger.info("⏸️ Market closed — skipping top picks generation")
+    #    return
 
     universe = load_universe()
     if not universe:
