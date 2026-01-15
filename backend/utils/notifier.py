@@ -1,6 +1,7 @@
+# backend/utils/notifier.py
+
 import aiohttp
 import logging
-import asyncio
 
 logger = logging.getLogger("notifier")
 
@@ -25,7 +26,3 @@ async def send_push_async(to_token: str, title: str, body: str, data: dict = Non
     except Exception as e:
         logger.error(f"❌ Push failed: {e}")
         return None
-
-
-def send_push(to_token, title, body, data=None):
-    asyncio.run(send_push_async(to_token, title, body, data))

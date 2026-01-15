@@ -322,9 +322,9 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
 
 
 async def run_top_picks_once(limit=TOP_N):
-    #if not market_open_now():
-    #    logger.info("⏸️ Market closed — skipping top picks generation")
-    #    return
+    if not market_open_now():
+        logger.info("⏸️ Market closed — skipping top picks generation")
+        return
 
     universe = load_universe()
     if not universe:
