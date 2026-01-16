@@ -115,13 +115,13 @@ async def top_picks():
             detail="Top picks not ready yet"
         )
 
-    return {
+    return clean_for_json({
         "status": "success",
         "interval": cached.get("interval", "5m"),
         "timestamp": cached.get("timestamp"),
         "returned": len(cached["data"]),
         "top_picks": cached["data"]
-    }
+    })
 
 @router.get("/update-top-picks")
 async def update_top_picks(
