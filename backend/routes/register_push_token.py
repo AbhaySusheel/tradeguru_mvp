@@ -1,56 +1,58 @@
-# backend/routes/register_push_token.py
+#backend/routes/register_push_token.py
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-import sqlite3
+from firebase_admin import firestore
 from datetime import datetime
 
-DB_PATH = "app.db"  # SQLite DB
-
 router = APIRouter()
+db = firestore.client()
 
+# ---------- Models ----------
 class PushToken(BaseModel):
     token: str
 
+
+# ---------- Register Token ----------
 @router.post("/register-push-token")
 async def register_push_token(payload: PushToken):
     token = payload.token.strip()
+
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
 
     try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        c = conn.cursor()
+        # Use token itself as document ID (prevents duplicates)
+        db.collection("push_tokens").document(token).set({
+            "createdAt": firestore.SERVER_TIMESTAMP
+        })
 
-        c.execute("""
-            INSERT OR IGNORE INTO push_tokens (token)
-            VALUES (?)
-        """, (token, ))
+        return {
+            "success": True,
+            "message": "Push token registered"
+        }
 
-        conn.commit()
-        conn.close()
-
-        return {"success": True, "message": "Token registered"}
     except Exception as e:
-        print("Error registering push token:", e)
+        print("❌ Error registering push token:", e)
         raise HTTPException(status_code=500, detail="Failed to register token")
 
-def db_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-
+# ---------- Fetch All Tokens (USED BY SCHEDULER) ----------
 def get_all_tokens():
-    conn = db_conn()
-    c = conn.cursor()
-    c.execute("SELECT token FROM push_tokens")
-    tokens = [row[0] for row in c.fetchall()]
-    conn.close()
-    return tokens
+    try:
+        docs = db.collection("push_tokens").stream()
+        tokens = [doc.id for doc in docs]
+        return tokens
+    except Exception as e:
+        print("❌ Failed to fetch tokens:", e)
+        return []
 
+
+# ---------- Debug Endpoint ----------
 @router.get("/debug_tokens")
 def debug_tokens():
-    conn = db_conn()
-    c = conn.cursor()
-    rows = c.execute("SELECT * FROM push_tokens").fetchall()
-    conn.close()
-    return {"tokens": rows}
-
+    docs = db.collection("push_tokens").stream()
+    tokens = [doc.id for doc in docs]
+    return {
+        "count": len(tokens),
+        "tokens": tokens
+    }

@@ -18,9 +18,9 @@ import logging
 from firebase_admin import firestore
 
 from datetime import datetime as dt, timedelta, time as dttime
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from data.top_picks_cache import update_top_picks_cache
-
+from pytz import timezone
 
 from routes.register_push_token import get_all_tokens  # helper to fetch all saved Expo tokens
 from utils.notifier import send_push_async  # async push version
@@ -28,6 +28,9 @@ from utils.notifier import send_push_async  # async push version
 from engine.top_picks_engine import generate_top_picks
 from models.stock_model import get_default_engine
 from db_migration import add_missing_columns  # migration helper
+
+_scheduler_started = False
+
 
 logger = logging.getLogger("scheduler")
 logger.setLevel(logging.INFO)
@@ -46,7 +49,8 @@ BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.70"))
 
 # ----------------------- FIREBASE INIT -----------------------
 
-db_firestore = firestore.client()
+def get_firestore():
+    return firestore.client()
 
 # ----------------------- DB HELPERS -----------------------
 def db_conn():
@@ -144,6 +148,7 @@ async def monitor_position(pos):
 
                 # ✅ Send to all registered tokens
                 tokens = get_all_tokens()
+                logger.warning(f"📣 TOKENS FOUND (monitor): {len(tokens)}")
                 tasks.extend([
                     send_push_async(
                         to_token=token,
@@ -188,6 +193,7 @@ async def monitor_position(pos):
         log_notification("stop-loss-hard", symbol, title, body)
 
         tokens = get_all_tokens()
+        logger.warning(f"📣 TOKENS FOUND: {len(tokens)}")
         tasks.extend([
             send_push_async(
                 to_token=token,
@@ -210,32 +216,46 @@ async def monitor_position(pos):
 
 
 async def monitor_positions():
-    if not market_open_now():
-        logger.info("⚠️ Market closed — skipping position monitoring")
-        return
+    try:
+        if not market_open_now():
+            logger.info("⚠️ Market closed — skipping position monitoring")
+            return
 
-    conn = db_conn()
-    c = conn.cursor()
-    c.execute("""SELECT symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, 
-                        profit_alerts_sent, stop_alerts_sent
-                 FROM positions""")
-    positions = c.fetchall()
-    conn.close()
+        conn = db_conn()
+        c = conn.cursor()
+        c.execute("""SELECT ...""")
+        positions = c.fetchall()
+        conn.close()
 
-    tasks = [monitor_position(pos) for pos in positions]
-    if tasks:
-        await asyncio.gather(*tasks)
+        if not positions:
+            return
+
+        await asyncio.gather(*(monitor_position(pos) for pos in positions))
+
+    except Exception as e:
+        logger.exception("❌ monitor_positions crashed: %s", e)
 
 # ----------------------- SAVE + NOTIFY -----------------------
 def save_top_picks_to_firestore(picks, top_n=TOP_N):
     ts_val = dt.utcnow().isoformat()
-    docs = [{"ts": ts_val, "symbol": p.get("symbol"), "last_price": p.get("last_price"),
-             "score": p.get("score"), "intraday_pct": p.get("intraday_pct")} for p in picks[:top_n]]
+    docs = [{
+        "ts": ts_val,
+        "symbol": p.get("symbol"),
+        "last_price": p.get("last_price"),
+        "score": p.get("score"),
+        "intraday_pct": p.get("intraday_pct")
+    } for p in picks[:top_n]]
+
     try:
-        db_firestore.collection("top_picks").document("latest").set({"timestamp": ts_val, "data": docs})
+        db = get_firestore()
+        db.collection("top_picks").document("latest").set({
+            "timestamp": ts_val,
+            "data": docs
+        })
         logger.info("✅ Top picks saved to Firestore")
     except Exception as e:
         logger.error("❌ Failed to save top picks to Firestore: %s", e)
+
 
 def log_notification(type_, symbol, title, body):
     def _write():
@@ -252,7 +272,7 @@ def log_notification(type_, symbol, title, body):
     try_db_write(_write)
 
 # ----------------------- TOP PICKS -----------------------
-scheduler = BackgroundScheduler()
+scheduler = AsyncIOScheduler(timezone=timezone("Asia/Kolkata"))
 
 
 async def notify_all_users_about_top_pick(top_pick):
@@ -260,6 +280,7 @@ async def notify_all_users_about_top_pick(top_pick):
         return
 
     tokens = get_all_tokens()
+    logger.warning(f"📣 TOKENS FOUND (top-pick): {len(tokens)}")
     if not tokens:
         return
 
@@ -343,36 +364,57 @@ def run_top_picks_async_wrapper():
         logger.error("❌ Error running scheduled top picks job: %s", e)
 
 
-def monitor_positions_sync():
-    asyncio.run(monitor_positions())
+#def monitor_positions_sync():
+#    asyncio.run(monitor_positions())
 
-def run_top_picks_once_sync():
-    asyncio.run(run_top_picks_once())
+#def run_top_picks_once_sync():
+#    asyncio.run(run_top_picks_once())
 # ----------------------- SCHEDULER -----------------------
+async def safe_run_top_picks():
+    try:
+        await run_top_picks_once()
+    except Exception as e:
+        logger.exception("❌ Top picks job crashed: %s", e)
+
+
 def start_scheduler():
-    add_missing_columns()
-    if scheduler.running:
-        logger.warning("⚠️ Scheduler already running.")
+    global _scheduler_started
+
+    if _scheduler_started:
+        logger.warning("⚠️ Scheduler already started (guarded).")
         return
 
+    add_missing_columns()
+
+    if scheduler.running:
+        logger.warning("⚠️ Scheduler already running (APS check).")
+        return
+
+    tokens = get_all_tokens()
+    logger.warning(f"🚀 PUSH TOKENS AT STARTUP: {len(tokens)}")    
+
     scheduler.add_job(
-        monitor_positions_sync,
-        'interval',
+        monitor_positions,        # ✅ async OK
+        trigger="interval",
         minutes=MONITOR_INTERVAL_MIN,
         max_instances=1,
-        coalesce=True
+        coalesce=True,
+        id="monitor_positions"
     )
 
     scheduler.add_job(
-        run_top_picks_once_sync,
-        'interval',
+        safe_run_top_picks,       # ✅ async OK
+        trigger="interval",
         minutes=TOPPICKS_INTERVAL_MIN,
         max_instances=1,
-        coalesce=True
+        coalesce=True,
+        id="top_picks"
     )
 
     scheduler.start()
-    logger.info("✅ Scheduler started.")
+    _scheduler_started = True
+
+    logger.info("✅ AsyncIO Scheduler started successfully.")
 
 def shutdown_scheduler():
     scheduler.shutdown(wait=True)

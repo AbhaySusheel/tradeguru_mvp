@@ -34,10 +34,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print("⚠️ Startup top picks run failed:", e)
 
-    start_scheduler()
-    print("✅ Scheduler started, TradeGuru API is running")
-    
-    yield  # App is now running
+    print("⏰ Starting scheduler...")
+    start_scheduler()   # ✅ THIS IS THE FIX
+    print("✅ Scheduler started")
+
+    yield
+
 
 app = FastAPI(title="TradeGuru API", lifespan=lifespan)
 
