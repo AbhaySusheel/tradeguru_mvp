@@ -364,11 +364,11 @@ def run_top_picks_async_wrapper():
         logger.error("❌ Error running scheduled top picks job: %s", e)
 
 
-#def monitor_positions_sync():
-#    asyncio.run(monitor_positions())
+def monitor_positions_sync():
+    asyncio.run(monitor_positions())
 
-#def run_top_picks_once_sync():
-#    asyncio.run(run_top_picks_once())
+def run_top_picks_once_sync():
+    asyncio.run(run_top_picks_once())
 # ----------------------- SCHEDULER -----------------------
 async def safe_run_top_picks():
     try:
