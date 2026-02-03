@@ -17,8 +17,10 @@ class PushToken(BaseModel):
 async def register_push_token(payload: PushToken):
     token = payload.token.strip()
 
-    if not token:
-        raise HTTPException(status_code=400, detail="Token is required")
+    if not token or not token.startswith("ExponentPushToken"):
+        raise HTTPException(status_code=400, detail="Invalid push token")
+
+
 
     try:
         # Use token itself as document ID (prevents duplicates)

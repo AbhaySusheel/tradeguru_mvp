@@ -223,11 +223,25 @@ async def monitor_positions():
 
         conn = db_conn()
         c = conn.cursor()
-        c.execute("""SELECT ...""")
+
+        c.execute("""
+        SELECT
+            "symbol",
+            "entry_price",
+            "predicted_max",
+            "status",
+            "soft_stop_pct",
+            "hard_stop_pct",
+            "profit_alerts_sent",
+            "stop_alerts_sent"
+        FROM "positions"
+        """)
+
         positions = c.fetchall()
         conn.close()
 
         if not positions:
+            logger.info("ℹ️ No positions found")
             return
 
         await asyncio.gather(*(monitor_position(pos) for pos in positions))
