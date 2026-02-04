@@ -21,6 +21,7 @@ from routes.sell_stock import router as sell_stock_router
 
 
 API_KEY = os.getenv("API_KEY")
+print("🔐 API_KEY loaded:", "YES" if API_KEY else "NO")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
