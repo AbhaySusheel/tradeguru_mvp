@@ -212,14 +212,14 @@ async def monitor_position(pos):
 
     # Run all push tasks asynchronously
     if tasks:
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def monitor_positions():
     try:
-        if not market_open_now():
-            logger.info("⚠️ Market closed — skipping position monitoring")
-            return
+        # if not market_open_now():
+        #     logger.info("⚠️ Market closed — skipping position monitoring")
+        #     return
 
         conn = db_conn()
         c = conn.cursor()
@@ -357,9 +357,9 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
 
 
 async def run_top_picks_once(limit=TOP_N):
-    if not market_open_now():
-        logger.info("⏸️ Market closed — skipping top picks generation")
-        return
+    # if not market_open_now():
+    #     logger.info("⏸️ Market closed — skipping top picks generation")
+    #     return
 
     universe = load_universe()
     if not universe:
