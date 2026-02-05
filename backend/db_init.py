@@ -1,3 +1,4 @@
+#backend/db_init.py
 import os
 import json
 import sqlite3
@@ -27,76 +28,37 @@ db_firestore = firestore.client()
 # -----------------------------
 # ✅ SQLITE DATABASE INITIALIZATION
 # -----------------------------
+
 def init_db():
     conn = sqlite3.connect("app.db")
     c = conn.cursor()
 
-    # all_stocks keeps latest snapshot per symbol
+    # Latest snapshot per symbol (engine cache)
     c.execute("""
     CREATE TABLE IF NOT EXISTS all_stocks (
-      symbol TEXT PRIMARY KEY,
-      last_price REAL,
-      intraday_pct REAL,
-      ma_diff REAL,
-      vol_ratio REAL,
-      rsi REAL,
-      score REAL,
-      ts TEXT
+        symbol TEXT PRIMARY KEY,
+        last_price REAL,
+        intraday_pct REAL,
+        ma_diff REAL,
+        vol_ratio REAL,
+        rsi REAL,
+        score REAL,
+        ts TEXT
     )
     """)
 
-    # top_picks history (snapshot of latest picks)
+    # Top picks history
     c.execute("""
     CREATE TABLE IF NOT EXISTS top_picks (
-      ts TEXT,
-      symbol TEXT,
-      last_price REAL,
-      score REAL,
-      intraday_pct REAL
+        ts TEXT,
+        symbol TEXT,
+        last_price REAL,
+        score REAL,
+        intraday_pct REAL
     )
     """)
 
-    # positions (OPEN/CLOSED trades)
-    # positions (OPEN/CLOSED trades)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS positions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      symbol TEXT,
-      entry_price REAL,
-      predicted_max REAL,
-      status TEXT,
-      soft_stop_pct REAL,
-      hard_stop_pct REAL,
-      profit_alerts_sent TEXT,
-      stop_alerts_sent TEXT,
-      sell_price REAL,
-      created_at TEXT,
-      closed_at TEXT
-    )
-    """)
-
-
-    # notifications (push/log messages)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS notifications (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts TEXT,
-      type TEXT,
-      symbol TEXT,
-      note TEXT
-    )
-    """)
-    
-
-
-    # helper to prevent repeated alerts
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS notification_cooldown (
-      symbol TEXT PRIMARY KEY,
-      last_warn_ts TEXT
-    )
-    """)
-
+    # Push notification tokens
     c.execute("""
     CREATE TABLE IF NOT EXISTS push_tokens (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,10 +67,10 @@ def init_db():
     )
     """)
 
-
     conn.commit()
     conn.close()
-    print("✅ Database initialized successfully.")
+
+    print("✅ SQLite cache database initialized successfully.")
 
 
 if __name__ == "__main__":

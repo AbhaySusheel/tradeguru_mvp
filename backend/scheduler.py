@@ -11,7 +11,7 @@ Includes:
 
 import os
 import time
-import sqlite3
+#import sqlite3
 import asyncio
 import json
 import logging
@@ -27,7 +27,9 @@ from utils.notifier import send_push_async  # async push version
 
 from engine.top_picks_engine import generate_top_picks
 from models.stock_model import get_default_engine
-from db_migration import add_missing_columns  # migration helper
+from utils.firestore_db import positions_ref
+from utils.firestore_db import notifications_ref
+  # migration helper
 
 _scheduler_started = False
 
@@ -40,7 +42,7 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 # ----------------------- CONFIG -----------------------
-DB = os.getenv("DB_PATH", "app.db")
+
 TOP_N = int(os.getenv("TOP_N", "10"))
 TOPPICKS_INTERVAL_MIN = int(os.getenv("TOPPICKS_INTERVAL_MIN", "15"))
 MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "2"))
@@ -53,22 +55,6 @@ def get_firestore():
     return firestore.client()
 
 # ----------------------- DB HELPERS -----------------------
-def db_conn():
-    return sqlite3.connect(DB, check_same_thread=False)
-
-def try_db_write(func, *args, retries=2, **kwargs):
-    for attempt in range(1, retries + 1):
-        try:
-            func(*args, **kwargs)
-            return True
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower():
-                logger.warning("⚠️ DB locked, retrying (%s/%s)...", attempt, retries)
-                time.sleep(0.1 * attempt)
-            else:
-                logger.error("❌ DB write error: %s", e)
-                break
-    return False
 
 def load_universe(csv_path="universe_final_with_liquidity.csv"):
     if not os.path.exists(csv_path):
@@ -104,147 +90,99 @@ def market_open_now():
 # ----------------------- SMART MONITOR -----------------------
 # Inside scheduler.py
 # ----------------------- SMART MONITOR -----------------------
-async def monitor_position(pos):
+async def monitor_position(doc_id, pos):
     """
-    Monitors a single position for profit milestones and stop-loss.
-    pos: tuple from DB (symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent)
+    Monitors a single Firestore position
     """
-    symbol, entry_price, predicted_max, status, soft_stop_pct, hard_stop_pct, profit_alerts_sent, stop_alerts_sent = pos
-    if status != "OPEN":
-        return  # skip closed
+    if pos["status"] != "OPEN":
+        return
 
-    symbol_ns = symbol if symbol.endswith(".NS") else symbol + ".NS"
+    symbol = pos["symbol"]
+    entry_price = pos["entry_price"]
+    predicted_max = pos.get("predicted_max")
+    soft_stop_pct = pos.get("soft_stop_pct", 3.0)
+    hard_stop_pct = pos.get("hard_stop_pct", 7.0)
+    profit_alerts_sent = set(pos.get("profit_alerts_sent", []))
+    stop_alerts_sent = set(pos.get("stop_alerts_sent", []))
 
     try:
         engine = get_default_engine()
-        stock_data = engine.get_last_price(symbol_ns)
+        stock_data = engine.get_last_price(symbol)
         if not stock_data:
             return
-        last_price = float(stock_data.get("last_price", 0))
+        last_price = float(stock_data["last_price"])
     except Exception as e:
-        logger.warning(f"Failed to fetch price for {symbol}: {e}")
+        logger.warning(f"Failed price fetch for {symbol}: {e}")
         return
 
     tasks = []
 
-    # -------- PROFIT MILESTONES --------
+    # ---------- PROFIT MILESTONES ----------
     if predicted_max and predicted_max > entry_price:
         milestones = [
             (0.25, "Stock is rising!"),
             (0.50, "Stock is rising steadily!"),
-            (0.75, "Stock is rising — almost halfway to max!"),
+            (0.75, "Almost halfway to max!"),
             (0.95, "Almost there!"),
-            (0.97, "Getting close!"),
             (0.985, "Near maximum!")
         ]
-        sent = set(profit_alerts_sent.split(',')) if profit_alerts_sent else set()
+
         for pct, note in milestones:
             milestone_price = entry_price + (predicted_max - entry_price) * pct
             key = str(round(milestone_price, 2))
-            if last_price >= milestone_price and key not in sent:
-                title = f"📈 {symbol} is rising!"
-                body = f"Entry:{entry_price}, Current:{round(last_price,2)}, {note} ({round(milestone_price,2)})"
-                log_notification("profit-milestone", symbol, title, body)
 
-                # ✅ Send to all registered tokens
+            if last_price >= milestone_price and key not in profit_alerts_sent:
+                title = f"📈 {symbol} rising"
+                body = f"Entry {entry_price}, Current {round(last_price,2)}"
+
+                log_notification("profit", symbol, title, body)
+
                 tokens = get_all_tokens()
-                logger.warning(f"📣 TOKENS FOUND (monitor): {len(tokens)}")
                 tasks.extend([
                     send_push_async(
-                        to_token=token,
-                        title=title,
-                        body=body,
-                        data={"symbol": symbol, "type": "profit-milestone"}
+                        token,
+                        title,
+                        body,
+                        {"symbol": symbol, "type": "profit"}
                     ) for token in tokens
                 ])
 
-                sent.add(key)
+                profit_alerts_sent.add(key)
 
-        conn = db_conn()
-        c = conn.cursor()
-        c.execute("UPDATE positions SET profit_alerts_sent=? WHERE symbol=?", (','.join(sent), symbol))
-        conn.commit()
-        conn.close()
-
-    # -------- STOP-LOSS --------
-    stop_sent = set(stop_alerts_sent.split(',')) if stop_alerts_sent else set()
+    # ---------- STOP LOSS ----------
     soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
     hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
 
-    if last_price <= soft_stop_price and "soft" not in stop_sent:
-        title = f"⚠️ {symbol} dropped, monitor closely!"
-        body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Soft stop:{round(soft_stop_price,2)}"
-        log_notification("stop-loss-soft", symbol, title, body)
+    if last_price <= soft_stop_price and "soft" not in stop_alerts_sent:
+        stop_alerts_sent.add("soft")
 
-        tokens = get_all_tokens()
-        tasks.extend([
-            send_push_async(
-                to_token=token,
-                title=title,
-                body=body,
-                data={"symbol": symbol, "type": "stop-loss-soft"}
-            ) for token in tokens
-        ])
-        stop_sent.add("soft")
+    if last_price <= hard_stop_price and "hard" not in stop_alerts_sent:
+        stop_alerts_sent.add("hard")
 
-    if last_price <= hard_stop_price and "hard" not in stop_sent:
-        title = f"❌ {symbol} hit stop-loss!"
-        body = f"Entry:{entry_price}, Current:{round(last_price,2)}, Hard stop:{round(hard_stop_price,2)}"
-        log_notification("stop-loss-hard", symbol, title, body)
+    # ---------- UPDATE FIRESTORE ----------
+    positions_ref().document(doc_id).update({
+        "profit_alerts_sent": list(profit_alerts_sent),
+        "stop_alerts_sent": list(stop_alerts_sent),
+        "last_checked_at": dt.utcnow().isoformat()
+    })
 
-        tokens = get_all_tokens()
-        logger.warning(f"📣 TOKENS FOUND: {len(tokens)}")
-        tasks.extend([
-            send_push_async(
-                to_token=token,
-                title=title,
-                body=body,
-                data={"symbol": symbol, "type": "stop-loss-hard"}
-            ) for token in tokens
-        ])
-        stop_sent.add("hard")
-
-    conn = db_conn()
-    c = conn.cursor()
-    c.execute("UPDATE positions SET stop_alerts_sent=? WHERE symbol=?", (','.join(stop_sent), symbol))
-    conn.commit()
-    conn.close()
-
-    # Run all push tasks asynchronously
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
-
 async def monitor_positions():
     try:
-        # if not market_open_now():
-        #     logger.info("⚠️ Market closed — skipping position monitoring")
-        #     return
+        docs = positions_ref().stream()
+        tasks = []
 
-        conn = db_conn()
-        c = conn.cursor()
+        for d in docs:
+            pos = d.to_dict()
+            tasks.append(monitor_position(d.id, pos))
 
-        c.execute("""
-        SELECT
-            "symbol",
-            "entry_price",
-            "predicted_max",
-            "status",
-            "soft_stop_pct",
-            "hard_stop_pct",
-            "profit_alerts_sent",
-            "stop_alerts_sent"
-        FROM "positions"
-        """)
-
-        positions = c.fetchall()
-        conn.close()
-
-        if not positions:
-            logger.info("ℹ️ No positions found")
+        if not tasks:
+            logger.info("ℹ️ No positions found (Firestore)")
             return
 
-        await asyncio.gather(*(monitor_position(pos) for pos in positions))
+        await asyncio.gather(*tasks)
 
     except Exception as e:
         logger.exception("❌ monitor_positions crashed: %s", e)
@@ -272,18 +210,13 @@ def save_top_picks_to_firestore(picks, top_n=TOP_N):
 
 
 def log_notification(type_, symbol, title, body):
-    def _write():
-        conn = db_conn()
-        c = conn.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS notifications(
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     ts TEXT, type TEXT, symbol TEXT, note TEXT)""")
-        ts_val = dt.utcnow().isoformat()
-        c.execute("INSERT INTO notifications(ts,type,symbol,note) VALUES(?,?,?,?)",
-                  (ts_val, type_, symbol, title + " - " + body))
-        conn.commit()
-        conn.close()
-    try_db_write(_write)
+    notifications_ref().add({
+        "type": type_,
+        "symbol": symbol,
+        "title": title,
+        "body": body,
+        "created_at": dt.utcnow().isoformat()
+    })
 
 # ----------------------- TOP PICKS -----------------------
 scheduler = AsyncIOScheduler(timezone=timezone("Asia/Kolkata"))
@@ -398,7 +331,7 @@ def start_scheduler():
         logger.warning("⚠️ Scheduler already started (guarded).")
         return
 
-    add_missing_columns()
+    
 
     if scheduler.running:
         logger.warning("⚠️ Scheduler already running (APS check).")

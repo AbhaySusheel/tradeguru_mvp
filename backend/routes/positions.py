@@ -1,27 +1,26 @@
 # backend/routes/positions.py
-from fastapi import APIRouter, Depends
-from firebase_admin import firestore
+
+from fastapi import APIRouter
+from utils.firestore_db import positions_ref
 
 router = APIRouter()
-db = firestore.client()
 
 @router.get("/positions")
 def list_positions():
-    docs = db.collection("positions").stream()
+    docs = positions_ref().stream()
 
-    open_pos = []
-    closed_pos = []
+    open_positions = []
+    closed_positions = []
 
     for d in docs:
-        data = d.to_dict()
-        data["id"] = d.id
+        rec = d.to_dict()
 
-        if data.get("status") == "OPEN":
-            open_pos.append(data)
+        if rec["status"] == "OPEN":
+            open_positions.append(rec)
         else:
-            closed_pos.append(data)
+            closed_positions.append(rec)
 
     return {
-        "open": open_pos,
-        "closed": closed_pos,
+        "open": open_positions,
+        "closed": closed_positions
     }
