@@ -107,10 +107,11 @@ async def monitor_position(doc_id, pos):
 
     try:
         engine = get_default_engine()
-        stock_data = engine.get_last_price(symbol)
-        if not stock_data:
+        res = engine.analyze_stock(symbol, fetch_if_missing=True)
+        if not res.get("ok"):
+            logger.warning(f"Failed price fetch for {symbol}: {res.get('error')}")
             return
-        last_price = float(stock_data["last_price"])
+        last_price = float(res["last_price"])
     except Exception as e:
         logger.warning(f"Failed price fetch for {symbol}: {e}")
         return
