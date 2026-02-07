@@ -47,7 +47,7 @@ TOP_N = int(os.getenv("TOP_N", "10"))
 TOPPICKS_INTERVAL_MIN = int(os.getenv("TOPPICKS_INTERVAL_MIN", "15"))
 MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "2"))
 FCM_TEST_TOKEN = os.getenv("TEST_DEVICE_TOKEN", "")
-BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.70"))
+BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.60"))
 
 # ----------------------- FIREBASE INIT -----------------------
 
@@ -173,7 +173,7 @@ async def monitor_position(doc_id, pos):
 async def monitor_positions():
     try:
         if not market_open_now():
-            logger.info("⏸️ Market closed — skipping top picks generation")
+            logger.info("⏸️ Market closed — skipping Positions Monitoring")
             return
         docs = positions_ref().stream()
         tasks = []
@@ -294,9 +294,9 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
 
 
 async def run_top_picks_once(limit=TOP_N):
-    if not market_open_now():
-        logger.info("⏸️ Market closed — skipping top picks generation")
-        return
+    # if not market_open_now():
+    #     logger.info("⏸️ Market closed — skipping top picks generation")
+    #     return
 
     universe = load_universe()
     if not universe:
