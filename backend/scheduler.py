@@ -94,27 +94,68 @@ async def monitor_position(doc_id, pos):
     """
     Monitors a single Firestore position
     """
-    if pos["status"] != "OPEN":
+    if pos.get("status") != "OPEN":
         return
 
     symbol = pos["symbol"]
-    entry_price = pos["entry_price"]
+    entry_price = float(pos["entry_price"])
     predicted_max = pos.get("predicted_max")
-    soft_stop_pct = pos.get("soft_stop_pct", 3.0)
-    hard_stop_pct = pos.get("hard_stop_pct", 7.0)
+
+    soft_stop_pct = float(pos.get("soft_stop_pct", 3.0))
+    hard_stop_pct = float(pos.get("hard_stop_pct", 7.0))
+
     profit_alerts_sent = set(pos.get("profit_alerts_sent", []))
     stop_alerts_sent = set(pos.get("stop_alerts_sent", []))
 
+    # ---------- FETCH PRICE ----------
     try:
         engine = get_default_engine()
         res = engine.analyze_stock(symbol, fetch_if_missing=True)
+
         if not res.get("ok"):
-            logger.warning(f"Failed price fetch for {symbol}: {res.get('error')}")
+            logger.warning(f"[{symbol}] Price fetch failed")
             return
+
         last_price = float(res["last_price"])
+
     except Exception as e:
-        logger.warning(f"Failed price fetch for {symbol}: {e}")
+        logger.warning(f"[{symbol}] Price fetch exception: {e}")
         return
+
+    # ---------- STOP LOSS ----------
+    soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+    hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
+
+    # 🟠 Soft SL (alert only)
+    if last_price <= soft_stop_price and "soft" not in stop_alerts_sent:
+        logger.info(f"⚠️ Soft SL hit: {symbol}")
+        stop_alerts_sent.add("soft")
+
+    # 🔴 HARD SL (CLOSE + PUSH)
+    if last_price <= hard_stop_price and "hard" not in stop_alerts_sent:
+        logger.info(f"🚨 HARD SL HIT: {symbol}")
+
+        await send_push_to_all(
+            title=f"🚨 Stop Loss Hit: {symbol}",
+            body=f"Entry {entry_price} → Exit {round(last_price,2)}",
+            data={
+                "symbol": symbol,
+                "type": "stop-loss"
+            }
+        )
+
+        stop_alerts_sent.add("hard")
+
+        # 🔒 CLOSE POSITION
+        await positions_ref().document(doc_id).update({
+            "status": "CLOSED",
+            "sell_price": last_price,
+            "closed_at": dt.utcnow().isoformat(),
+            "stop_alerts_sent": list(stop_alerts_sent),
+            "last_checked_at": dt.utcnow().isoformat()
+        })
+
+        return  # ⛔ IMPORTANT: stop further processing
 
     tasks = []
 
@@ -134,7 +175,7 @@ async def monitor_position(doc_id, pos):
 
             if last_price >= milestone_price and key not in profit_alerts_sent:
                 title = f"📈 {symbol} rising"
-                body = f"Entry {entry_price}, Current {round(last_price,2)}"
+                body = f"Entry {entry_price} → {round(last_price,2)}"
 
                 log_notification("profit", symbol, title, body)
 
@@ -150,18 +191,8 @@ async def monitor_position(doc_id, pos):
 
                 profit_alerts_sent.add(key)
 
-    # ---------- STOP LOSS ----------
-    soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
-    hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
-
-    if last_price <= soft_stop_price and "soft" not in stop_alerts_sent:
-        stop_alerts_sent.add("soft")
-
-    if last_price <= hard_stop_price and "hard" not in stop_alerts_sent:
-        stop_alerts_sent.add("hard")
-
     # ---------- UPDATE FIRESTORE ----------
-    positions_ref().document(doc_id).update({
+    await positions_ref().document(doc_id).update({
         "profit_alerts_sent": list(profit_alerts_sent),
         "stop_alerts_sent": list(stop_alerts_sent),
         "last_checked_at": dt.utcnow().isoformat()
@@ -294,9 +325,9 @@ async def generate_and_store_top_picks(universe, limit=TOP_N):
 
 
 async def run_top_picks_once(limit=TOP_N):
-    # if not market_open_now():
-    #     logger.info("⏸️ Market closed — skipping top picks generation")
-    #     return
+    if not market_open_now():
+        logger.info("⏸️ Market closed — skipping top picks generation")
+        return
 
     universe = load_universe()
     if not universe:

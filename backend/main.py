@@ -16,12 +16,20 @@ from routes.positions import router as positions_router
 from routes.register_push_token import router as push_token_router
 from routes.buy_stock import router as buy_stock_router
 from routes.sell_stock import router as sell_stock_router
+from routes.closed_positions import router as closed_positions_router
 
 
 
 
 API_KEY = os.getenv("API_KEY")
 print("🔐 API_KEY loaded:", "YES" if API_KEY else "NO")
+
+PROTECTED_PATHS = (
+    "/api/positions",
+    "/api/closed-positions",
+    "/api/buy",
+    "/api/sell",
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -54,11 +62,16 @@ app.add_middleware(
 
 @app.middleware("http")
 async def verify_api_key(request: Request, call_next):
-    if request.url.path.startswith("/api/positions"):
+    if request.url.path.startswith(PROTECTED_PATHS):
         header_key = request.headers.get("x-api-key")
         if header_key != API_KEY:
-            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or missing API key"}
+            )
     return await call_next(request)
+
+
 
 # Include routes
 app.include_router(stocks_router, prefix="/api")
@@ -67,6 +80,7 @@ app.include_router(positions_router, prefix="/api")
 app.include_router(push_token_router, prefix="/api")
 app.include_router(buy_stock_router, prefix="/api") 
 app.include_router(sell_stock_router, prefix="/api")
+app.include_router(closed_positions_router, prefix="/api")
 
 @app.get("/")
 def root():

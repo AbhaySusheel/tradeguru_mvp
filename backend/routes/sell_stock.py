@@ -26,14 +26,28 @@ async def sell_stock(req: SellStockRequest):
     if data["status"] != "OPEN":
         raise HTTPException(status_code=400, detail="Position already closed")
 
+    entry_price = float(data["entry_price"])
+    sell_price = float(req.sell_price)
+
+    profit_loss = round(((sell_price - entry_price) / entry_price) * 100, 2)
+    closed_at = dt.utcnow().isoformat()
+
+    # ✅ Update Firestore
     doc_ref.update({
         "status": "CLOSED",
-        "sell_price": req.sell_price,
-        "closed_at": dt.utcnow().isoformat()
+        "sell_price": sell_price,
+        "closed_at": closed_at,
+        "profit_loss": profit_loss,
+        "close_reason": "MANUAL"
     })
 
+    # ✅ Return everything frontend needs
     return {
         "ok": True,
         "symbol": symbol_ns,
-        "sell_price": req.sell_price
+        "entry_price": entry_price,
+        "sell_price": sell_price,
+        "profit_loss": profit_loss,
+        "sold_at": closed_at,
+        "close_reason": "MANUAL"
     }
