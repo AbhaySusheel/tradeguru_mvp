@@ -91,115 +91,99 @@ def market_open_now():
 # Inside scheduler.py
 # ----------------------- SMART MONITOR -----------------------
 async def monitor_position(doc_id, pos):
-    """
-    Monitors a single Firestore position
-    """
     if pos.get("status") != "OPEN":
         return
 
     symbol = pos["symbol"]
     entry_price = float(pos["entry_price"])
-    predicted_max = pos.get("predicted_max")
 
     soft_stop_pct = float(pos.get("soft_stop_pct", 3.0))
     hard_stop_pct = float(pos.get("hard_stop_pct", 7.0))
 
     profit_alerts_sent = set(pos.get("profit_alerts_sent", []))
     stop_alerts_sent = set(pos.get("stop_alerts_sent", []))
+    highest_profit_pct = float(pos.get("highest_profit_pct", 0.0))
 
     # ---------- FETCH PRICE ----------
     try:
         engine = get_default_engine()
         res = engine.analyze_stock(symbol, fetch_if_missing=True)
-
         if not res.get("ok"):
-            logger.warning(f"[{symbol}] Price fetch failed")
             return
-
         last_price = float(res["last_price"])
-
     except Exception as e:
-        logger.warning(f"[{symbol}] Price fetch exception: {e}")
+        logger.warning(f"[{symbol}] Price fetch failed: {e}")
         return
 
-    # ---------- STOP LOSS ----------
-    soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+    profit_pct = (last_price - entry_price) / entry_price
+
+    # ---------- HARD STOP LOSS ----------
     hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
+    if last_price <= hard_stop_price:
+        tokens = get_all_tokens()
+        await asyncio.gather(*[
+            send_push_async(
+                t,
+                f"🚨 Stop Loss Hit: {symbol}",
+                f"Entry {entry_price} → Exit {round(last_price,2)}",
+                {"symbol": symbol, "type": "stop-loss"}
+            ) for t in tokens
+        ])
 
-    # 🟠 Soft SL (alert only)
-    if last_price <= soft_stop_price and "soft" not in stop_alerts_sent:
-        logger.info(f"⚠️ Soft SL hit: {symbol}")
-        stop_alerts_sent.add("soft")
-
-    # 🔴 HARD SL (CLOSE + PUSH)
-    if last_price <= hard_stop_price and "hard" not in stop_alerts_sent:
-        logger.info(f"🚨 HARD SL HIT: {symbol}")
-
-        await send_push_to_all(
-            title=f"🚨 Stop Loss Hit: {symbol}",
-            body=f"Entry {entry_price} → Exit {round(last_price,2)}",
-            data={
-                "symbol": symbol,
-                "type": "stop-loss"
-            }
-        )
-
-        stop_alerts_sent.add("hard")
-
-        # 🔒 CLOSE POSITION
         await positions_ref().document(doc_id).update({
             "status": "CLOSED",
             "sell_price": last_price,
             "closed_at": dt.utcnow().isoformat(),
-            "stop_alerts_sent": list(stop_alerts_sent),
-            "last_checked_at": dt.utcnow().isoformat()
         })
+        return
 
-        return  # ⛔ IMPORTANT: stop further processing
+    # ---------- PROFIT TRACKING ----------
+    if profit_pct > highest_profit_pct:
+        highest_profit_pct = profit_pct
 
-    tasks = []
-
-    # ---------- PROFIT MILESTONES ----------
-    if predicted_max and predicted_max > entry_price:
-        milestones = [
-            (0.25, "Stock is rising!"),
-            (0.50, "Stock is rising steadily!"),
-            (0.75, "Almost halfway to max!"),
-            (0.95, "Almost there!"),
-            (0.985, "Near maximum!")
-        ]
-
-        for pct, note in milestones:
-            milestone_price = entry_price + (predicted_max - entry_price) * pct
-            key = str(round(milestone_price, 2))
-
-            if last_price >= milestone_price and key not in profit_alerts_sent:
-                title = f"📈 {symbol} rising"
-                body = f"Entry {entry_price} → {round(last_price,2)}"
-
-                log_notification("profit", symbol, title, body)
-
+        # milestone notifications
+        for m in [0.25, 0.50, 0.75, 0.90]:
+            if profit_pct >= m and str(m) not in profit_alerts_sent:
                 tokens = get_all_tokens()
-                tasks.extend([
+                await asyncio.gather(*[
                     send_push_async(
-                        token,
-                        title,
-                        body,
+                        t,
+                        f"📈 {symbol} +{int(m*100)}%",
+                        f"Price: {round(last_price,2)}",
                         {"symbol": symbol, "type": "profit"}
-                    ) for token in tokens
+                    ) for t in tokens
                 ])
+                profit_alerts_sent.add(str(m))
 
-                profit_alerts_sent.add(key)
+    # ---------- TRAILING SELL (PROFIT PROTECTION) ----------
+    if highest_profit_pct >= 0.25:
+        trailing_price = entry_price * (1 + highest_profit_pct * 0.9)
+        if last_price < trailing_price:
+            tokens = get_all_tokens()
+            await asyncio.gather(*[
+                send_push_async(
+                    t,
+                    f"📉 Sell Alert: {symbol}",
+                    f"Profit falling — secure gains",
+                    {"symbol": symbol, "type": "sell"}
+                ) for t in tokens
+            ])
 
-    # ---------- UPDATE FIRESTORE ----------
+            await positions_ref().document(doc_id).update({
+                "status": "CLOSED",
+                "sell_price": last_price,
+                "closed_at": dt.utcnow().isoformat(),
+                "highest_profit_pct": highest_profit_pct
+            })
+            return
+
+    # ---------- SAVE STATE ----------
     await positions_ref().document(doc_id).update({
+        "highest_profit_pct": highest_profit_pct,
         "profit_alerts_sent": list(profit_alerts_sent),
         "stop_alerts_sent": list(stop_alerts_sent),
         "last_checked_at": dt.utcnow().isoformat()
     })
-
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
 
 async def monitor_positions():
     try:
