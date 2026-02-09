@@ -130,7 +130,7 @@ async def monitor_position(doc_id, pos):
             ) for t in tokens
         ])
 
-        await positions_ref().document(doc_id).update({
+        positions_ref().document(doc_id).update({
             "status": "CLOSED",
             "sell_price": last_price,
             "closed_at": dt.utcnow().isoformat(),
@@ -169,7 +169,7 @@ async def monitor_position(doc_id, pos):
                 ) for t in tokens
             ])
 
-            await positions_ref().document(doc_id).update({
+            positions_ref().document(doc_id).update({
                 "status": "CLOSED",
                 "sell_price": last_price,
                 "closed_at": dt.utcnow().isoformat(),
@@ -178,7 +178,7 @@ async def monitor_position(doc_id, pos):
             return
 
     # ---------- SAVE STATE ----------
-    await positions_ref().document(doc_id).update({
+    positions_ref().document(doc_id).update({
         "highest_profit_pct": highest_profit_pct,
         "profit_alerts_sent": list(profit_alerts_sent),
         "stop_alerts_sent": list(stop_alerts_sent),
