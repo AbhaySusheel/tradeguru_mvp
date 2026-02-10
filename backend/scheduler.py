@@ -91,18 +91,27 @@ def market_open_now():
 # Inside scheduler.py
 # ----------------------- SMART MONITOR -----------------------
 async def monitor_position(doc_id, pos):
+    # ---- status guard ----
     if pos.get("status") != "OPEN":
         return
 
     symbol = pos["symbol"]
     entry_price = float(pos["entry_price"])
+    predicted_max = pos.get("predicted_max")
 
+    # ---- validation ----
+    if not predicted_max or predicted_max <= entry_price:
+        logger.warning(f"[{symbol}] Invalid predicted_max")
+        return
+
+    # ---- stops ----
     soft_stop_pct = float(pos.get("soft_stop_pct", 3.0))
     hard_stop_pct = float(pos.get("hard_stop_pct", 7.0))
 
-    profit_alerts_sent = set(pos.get("profit_alerts_sent", []))
-    stop_alerts_sent = set(pos.get("stop_alerts_sent", []))
-    highest_profit_pct = float(pos.get("highest_profit_pct", 0.0))
+    # ---- state ----
+    highest_progress = float(pos.get("highest_profit_pct", 0.0))
+    milestones_sent = set(pos.get("profit_alerts_sent", []))
+    early_drop_sent = pos.get("early_drop_sent", False)
 
     # ---------- FETCH PRICE ----------
     try:
@@ -115,20 +124,21 @@ async def monitor_position(doc_id, pos):
         logger.warning(f"[{symbol}] Price fetch failed: {e}")
         return
 
-    profit_pct = (last_price - entry_price) / entry_price
+    # ---------- PROGRESS CALCULATION ----------
+    if predicted_max == entry_price:
+        return
+
+    progress_pct = (last_price - entry_price) / (predicted_max - entry_price)
 
     # ---------- HARD STOP LOSS ----------
     hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
     if last_price <= hard_stop_price:
-        tokens = get_all_tokens()
-        await asyncio.gather(*[
-            send_push_async(
-                t,
-                f"🚨 Stop Loss Hit: {symbol}",
-                f"Entry {entry_price} → Exit {round(last_price,2)}",
-                {"symbol": symbol, "type": "stop-loss"}
-            ) for t in tokens
-        ])
+        log_notification(
+            "stop-loss",
+            symbol,
+            f"🚨 Stop Loss Hit: {symbol}",
+            f"Entry {entry_price} → Exit {round(last_price, 2)}"
+        )
 
         positions_ref().document(doc_id).update({
             "status": "CLOSED",
@@ -137,65 +147,76 @@ async def monitor_position(doc_id, pos):
         })
         return
 
-    # ---------- PROFIT TRACKING ----------
-    if profit_pct > highest_profit_pct:
-        highest_profit_pct = profit_pct
+    # ---------- EARLY DROP WARNING ----------
+    if not early_drop_sent and highest_progress == 0 and progress_pct < -0.02:
+        log_notification(
+            "early-drop",
+            symbol,
+            f"⚠️ {symbol} Falling After Buy",
+            f"Price slipping below entry: {round(last_price, 2)}"
+        )
+        early_drop_sent = True
 
-        # milestone notifications
-        for m in [0.25, 0.50, 0.75, 0.90]:
-            if profit_pct >= m and str(m) not in profit_alerts_sent:
-                tokens = get_all_tokens()
-                await asyncio.gather(*[
-                    send_push_async(
-                        t,
-                        f"📈 {symbol} +{int(m*100)}%",
-                        f"Price: {round(last_price,2)}",
-                        {"symbol": symbol, "type": "profit"}
-                    ) for t in tokens
-                ])
-                profit_alerts_sent.add(str(m))
+    # ---------- MILESTONE NOTIFICATIONS ----------
+    milestones = [0.25, 0.50, 0.75, 0.90]
+
+    if progress_pct > highest_progress:
+        highest_progress = progress_pct
+
+        for m in milestones:
+            if progress_pct >= m and str(m) not in milestones_sent:
+                price_at_milestone = entry_price + m * (predicted_max - entry_price)
+
+                log_notification(
+                    "profit",
+                    symbol,
+                    f"📈 {symbol} {int(m * 100)}% of Target",
+                    f"Price reached {round(price_at_milestone, 2)}"
+                )
+
+                milestones_sent.add(str(m))
 
     # ---------- TRAILING SELL (PROFIT PROTECTION) ----------
-    if highest_profit_pct >= 0.25:
-        trailing_price = entry_price * (1 + highest_profit_pct * 0.9)
-        if last_price < trailing_price:
-            tokens = get_all_tokens()
-            await asyncio.gather(*[
-                send_push_async(
-                    t,
-                    f"📉 Sell Alert: {symbol}",
-                    f"Profit falling — secure gains",
-                    {"symbol": symbol, "type": "sell"}
-                ) for t in tokens
-            ])
+    if highest_progress >= 0.25:
+        trail_level = highest_progress - 0.10  # 10% pullback from peak
+
+        if progress_pct < trail_level:
+            log_notification(
+                "sell",
+                symbol,
+                f"📉 Sell Alert: {symbol}",
+                f"Dropped from {int(highest_progress * 100)}% → {int(progress_pct * 100)}%"
+            )
 
             positions_ref().document(doc_id).update({
                 "status": "CLOSED",
                 "sell_price": last_price,
                 "closed_at": dt.utcnow().isoformat(),
-                "highest_profit_pct": highest_profit_pct
+                "highest_profit_pct": highest_progress
             })
             return
 
     # ---------- SAVE STATE ----------
     positions_ref().document(doc_id).update({
-        "highest_profit_pct": highest_profit_pct,
-        "profit_alerts_sent": list(profit_alerts_sent),
-        "stop_alerts_sent": list(stop_alerts_sent),
+        "highest_profit_pct": highest_progress,
+        "profit_alerts_sent": list(milestones_sent),
+        "early_drop_sent": early_drop_sent,
         "last_checked_at": dt.utcnow().isoformat()
     })
 
+
+# ----------------------- MAIN LOOP -----------------------
 async def monitor_positions():
     try:
         if not market_open_now():
             logger.info("⏸️ Market closed — skipping Positions Monitoring")
             return
+
         docs = positions_ref().stream()
         tasks = []
 
         for d in docs:
-            pos = d.to_dict()
-            tasks.append(monitor_position(d.id, pos))
+            tasks.append(monitor_position(d.id, d.to_dict()))
 
         if not tasks:
             logger.info("ℹ️ No positions found (Firestore)")
@@ -205,7 +226,6 @@ async def monitor_positions():
 
     except Exception as e:
         logger.exception("❌ monitor_positions crashed: %s", e)
-
 # ----------------------- SAVE + NOTIFY -----------------------
 def save_top_picks_to_firestore(picks, top_n=TOP_N):
     ts_val = dt.utcnow().isoformat()
