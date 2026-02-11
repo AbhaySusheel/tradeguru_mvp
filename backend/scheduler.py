@@ -91,49 +91,65 @@ def market_open_now():
 # Inside scheduler.py
 # ----------------------- SMART MONITOR -----------------------
 async def monitor_position(doc_id, pos):
-    # ---- status guard ----
+
+    # ---------------- STATUS GUARD ----------------
     if pos.get("status") != "OPEN":
         return
 
     symbol = pos["symbol"]
     entry_price = float(pos["entry_price"])
-    predicted_max = pos.get("predicted_max")
+    predicted_max = float(pos.get("predicted_max", 0))
 
-    # ---- validation ----
     if not predicted_max or predicted_max <= entry_price:
         logger.warning(f"[{symbol}] Invalid predicted_max")
         return
 
-    # ---- stops ----
-    soft_stop_pct = float(pos.get("soft_stop_pct", 3.0))
     hard_stop_pct = float(pos.get("hard_stop_pct", 7.0))
 
-    # ---- state ----
     highest_progress = float(pos.get("highest_profit_pct", 0.0))
     milestones_sent = set(pos.get("profit_alerts_sent", []))
     early_drop_sent = pos.get("early_drop_sent", False)
 
-    # ---------- FETCH PRICE ----------
+    # ---------------- FETCH PRICE ----------------
     try:
         engine = get_default_engine()
         res = engine.analyze_stock(symbol, fetch_if_missing=True)
+
         if not res.get("ok"):
             return
+
         last_price = float(res["last_price"])
+
     except Exception as e:
         logger.warning(f"[{symbol}] Price fetch failed: {e}")
         return
 
-    # ---------- PROGRESS CALCULATION ----------
-    if predicted_max == entry_price:
+    # ---------------- PROGRESS CALCULATION ----------------
+    denominator = (predicted_max - entry_price)
+
+    if denominator <= 0:
         return
 
-    progress_pct = (last_price - entry_price) / (predicted_max - entry_price)
+    progress_pct = (last_price - entry_price) / denominator
 
-    # ---------- HARD STOP LOSS ----------
+    # Clamp extreme negative
+    if progress_pct < -1:
+        progress_pct = -1
+
+    logger.info(
+        f"[{symbol}] Progress: {round(progress_pct*100,2)}% | "
+        f"Highest: {round(highest_progress*100,2)}%"
+    )
+
+    # ============================================================
+    # HARD STOP LOSS
+    # ============================================================
+
     hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
+
     if last_price <= hard_stop_price:
-        log_notification(
+
+        await notify_all_users_about_positions(
             "stop-loss",
             symbol,
             f"🚨 Stop Loss Hit: {symbol}",
@@ -145,47 +161,71 @@ async def monitor_position(doc_id, pos):
             "sell_price": last_price,
             "closed_at": dt.utcnow().isoformat(),
         })
+
+        logger.warning(f"[{symbol}] Closed via STOP LOSS")
         return
 
-    # ---------- EARLY DROP WARNING ----------
-    if not early_drop_sent and highest_progress == 0 and progress_pct < -0.02:
-        log_notification(
+
+    # ============================================================
+    # EARLY DROP WARNING (before any profit milestone)
+    # ============================================================
+
+    if not early_drop_sent and highest_progress <= 0 and progress_pct < -0.02:
+
+        await notify_all_users_about_positions(
             "early-drop",
             symbol,
             f"⚠️ {symbol} Falling After Buy",
             f"Price slipping below entry: {round(last_price, 2)}"
         )
-        early_drop_sent = True
 
-    # ---------- MILESTONE NOTIFICATIONS ----------
+        early_drop_sent = True
+        logger.info(f"[{symbol}] Early drop notification sent")
+
+
+    # ============================================================
+    # MILESTONE NOTIFICATIONS
+    # ============================================================
+
     milestones = [0.25, 0.50, 0.75, 0.90]
 
     if progress_pct > highest_progress:
         highest_progress = progress_pct
 
         for m in milestones:
-            if progress_pct >= m and str(m) not in milestones_sent:
-                price_at_milestone = entry_price + m * (predicted_max - entry_price)
 
-                log_notification(
+            if progress_pct >= m and str(m) not in milestones_sent:
+
+                milestone_price = entry_price + m * denominator
+
+                await notify_all_users_about_positions(
                     "profit",
                     symbol,
-                    f"📈 {symbol} {int(m * 100)}% of Target",
-                    f"Price reached {round(price_at_milestone, 2)}"
+                    f"📈 {symbol} {int(m*100)}% of Target",
+                    f"Price reached {round(milestone_price, 2)}"
                 )
 
                 milestones_sent.add(str(m))
 
-    # ---------- TRAILING SELL (PROFIT PROTECTION) ----------
+                logger.info(f"[{symbol}] Milestone {int(m*100)}% sent")
+
+
+    # ============================================================
+    # TRAILING SELL (PROFIT PROTECTION)
+    # ============================================================
+
     if highest_progress >= 0.25:
-        trail_level = highest_progress - 0.10  # 10% pullback from peak
+
+        # Allow 10% pullback from peak progress
+        trail_level = highest_progress - 0.10
 
         if progress_pct < trail_level:
-            log_notification(
+
+            await notify_all_users_about_positions(
                 "sell",
                 symbol,
                 f"📉 Sell Alert: {symbol}",
-                f"Dropped from {int(highest_progress * 100)}% → {int(progress_pct * 100)}%"
+                f"Dropped from {int(highest_progress*100)}% → {int(progress_pct*100)}%"
             )
 
             positions_ref().document(doc_id).update({
@@ -194,9 +234,15 @@ async def monitor_position(doc_id, pos):
                 "closed_at": dt.utcnow().isoformat(),
                 "highest_profit_pct": highest_progress
             })
+
+            logger.warning(f"[{symbol}] Closed via TRAILING SELL")
             return
 
-    # ---------- SAVE STATE ----------
+
+    # ============================================================
+    # SAVE STATE
+    # ============================================================
+
     positions_ref().document(doc_id).update({
         "highest_profit_pct": highest_progress,
         "profit_alerts_sent": list(milestones_sent),
@@ -286,6 +332,36 @@ async def notify_all_users_about_top_pick(top_pick):
             ], return_exceptions=True)
         except Exception as e:
             logger.warning(f"Push batch failed: {e}")
+
+async def notify_all_users_about_positions(type_, symbol, title, body, data=None):
+    tokens = get_all_tokens()
+    if not tokens:
+        logger.warning("⚠ No push tokens found")
+        return
+
+    logger.warning(f"📣 TOKENS FOUND ({type_}): {len(tokens)}")
+
+    # Send push
+    for i in range(0, len(tokens), 20):
+        batch = tokens[i:i + 20]
+        await asyncio.gather(*[
+            send_push_async(
+                to_token=token,
+                title=title,
+                body=body,
+                data=data or {"symbol": symbol, "type": type_}
+            )
+            for token in batch
+        ], return_exceptions=True)
+
+    # Log to Firestore
+    notifications_ref().add({
+        "type": type_,
+        "symbol": symbol,
+        "title": title,
+        "body": body,
+        "created_at": dt.utcnow().isoformat()
+    })
 
 async def generate_and_store_top_picks(universe, limit=TOP_N):
     picks = await generate_top_picks(universe, limit)
